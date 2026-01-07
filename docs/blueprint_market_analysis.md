@@ -660,7 +660,7 @@ func (s *MarketDataService) updateSortedSets(coin *Coin) error {
     pipe.ZAdd(ctx, "market:sorted:volume_idr", &redis.Z{
         Score:  coin.VolumeIDR,
         Member: coin.PairID,
-    })
+        })
     
     pipe.ZAdd(ctx, "market:sorted:change_24h", &redis.Z{
         Score:  coin.Change24h,
