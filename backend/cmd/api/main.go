@@ -14,6 +14,7 @@ import (
 	"tuyul/backend/internal/middleware"
 	"tuyul/backend/internal/repository"
 	"tuyul/backend/internal/service"
+	"tuyul/backend/pkg/indodax"
 	"tuyul/backend/pkg/jwt"
 	"tuyul/backend/pkg/logger"
 	"tuyul/backend/pkg/redis"
@@ -96,16 +97,22 @@ func main() {
 		cfg.JWT.RefreshTokenExpire,
 	)
 
+	// Initialize Indodax client
+	indodaxClient := indodax.NewClient(cfg.Indodax.APIURL)
+
 	// Initialize repositories
 	userRepo := repository.NewUserRepository(redisClient)
+	apiKeyRepo := repository.NewAPIKeyRepository(redisClient)
 
 	// Initialize services
 	authService := service.NewAuthService(userRepo, jwtManager)
 	userService := service.NewUserService(userRepo)
+	apiKeyService := service.NewAPIKeyService(apiKeyRepo, userRepo, indodaxClient, cfg.Encryption.Key)
 
 	// Initialize handlers
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(userService)
+	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 
 	// API v1 group
 	v1 := router.Group("/api/v1")
@@ -148,6 +155,17 @@ func main() {
 				admin.DELETE("/:id", userHandler.DeleteUser)
 				admin.POST("/:id/reset-password", userHandler.ResetPassword)
 			}
+		}
+
+		// API Key routes
+		apiKeys := v1.Group("/api-keys")
+		apiKeys.Use(middleware.AuthMiddleware(authService))
+		{
+			apiKeys.POST("", apiKeyHandler.Create)
+			apiKeys.GET("", apiKeyHandler.Get)
+			apiKeys.DELETE("", apiKeyHandler.Delete)
+			apiKeys.POST("/validate", apiKeyHandler.Validate)
+			apiKeys.GET("/account-info", apiKeyHandler.GetAccountInfo)
 		}
 	}
 
