@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"tuyul/backend/internal/config"
+	"tuyul/backend/internal/middleware"
 	"tuyul/backend/pkg/logger"
 	"tuyul/backend/pkg/redis"
 
@@ -57,9 +58,12 @@ func main() {
 	// Create Gin router
 	router := gin.New()
 
-	// Basic middleware
-	router.Use(gin.Recovery())
-	router.Use(gin.Logger())
+	// Apply middleware
+	router.Use(middleware.Recovery(log))          // Panic recovery
+	router.Use(middleware.RequestID())            // Request ID
+	router.Use(middleware.Logger(log))            // Request logging
+	router.Use(middleware.CORS(cfg.CORS.AllowedOrigins)) // CORS
+	router.Use(middleware.RateLimit(redisClient, cfg.RateLimit.RequestsPerMinute)) // Rate limiting
 
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
