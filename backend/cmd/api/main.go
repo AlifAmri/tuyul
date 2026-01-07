@@ -10,7 +10,11 @@ import (
 	"time"
 
 	"tuyul/backend/internal/config"
+	"tuyul/backend/internal/handler"
 	"tuyul/backend/internal/middleware"
+	"tuyul/backend/internal/repository"
+	"tuyul/backend/internal/service"
+	"tuyul/backend/pkg/jwt"
 	"tuyul/backend/pkg/logger"
 	"tuyul/backend/pkg/redis"
 
@@ -85,15 +89,66 @@ func main() {
 		})
 	})
 
+	// Initialize JWT manager
+	jwtManager := jwt.NewJWTManager(
+		cfg.JWT.Secret,
+		cfg.JWT.AccessTokenExpire,
+		cfg.JWT.RefreshTokenExpire,
+	)
+
+	// Initialize repositories
+	userRepo := repository.NewUserRepository(redisClient)
+
+	// Initialize services
+	authService := service.NewAuthService(userRepo, jwtManager)
+	userService := service.NewUserService(userRepo)
+
+	// Initialize handlers
+	authHandler := handler.NewAuthHandler(authService)
+	userHandler := handler.NewUserHandler(userService)
+
 	// API v1 group
 	v1 := router.Group("/api/v1")
 	{
+		// Public routes
 		v1.GET("/ping", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"message": "pong",
 				"time":    time.Now().Unix(),
 			})
 		})
+
+		// Auth routes
+		auth := v1.Group("/auth")
+		{
+			auth.POST("/register", authHandler.Register)
+			auth.POST("/login", middleware.AuthRateLimit(redisClient, cfg.RateLimit.AuthRequestsPerMinute), authHandler.Login)
+			auth.POST("/refresh", authHandler.RefreshToken)
+			auth.POST("/logout", middleware.AuthMiddleware(authService), authHandler.Logout)
+			auth.GET("/me", middleware.AuthMiddleware(authService), authHandler.GetMe)
+		}
+
+		// User routes
+		users := v1.Group("/users")
+		users.Use(middleware.AuthMiddleware(authService))
+		{
+			// Current user routes
+			users.GET("/profile", userHandler.GetProfile)
+			users.PUT("/profile", userHandler.UpdateProfile)
+			users.POST("/password", userHandler.ChangePassword)
+
+			// Admin only routes
+			admin := users.Group("")
+			admin.Use(middleware.RequireAdmin())
+			{
+				admin.GET("", userHandler.ListUsers)
+				admin.POST("", userHandler.CreateUser)
+				admin.GET("/:id", userHandler.GetUser)
+				admin.PUT("/:id", userHandler.UpdateUser)
+				admin.DELETE("/:id", userHandler.DeleteUser)
+				admin.POST("/:id/reset-password", userHandler.ResetPassword)
+			}
+		}
 	}
 
 	// Create HTTP server
