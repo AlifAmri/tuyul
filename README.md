@@ -1,10 +1,14 @@
-# TUYUL - Crypto Trading Bot for Indodax
-
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)
-![React](https://img.shields.io/badge/React-18+-61DAFB?logo=react)
-![Redis](https://img.shields.io/badge/Redis-7+-DC382D?logo=redis)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+<div align="center">
+  <img src="logo.png" alt="TUYUL Logo" width="200"/>
+  
+  # TUYUL - Crypto Trading Bot for Indodax
+  
+  ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+  ![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)
+  ![React](https://img.shields.io/badge/React-18+-61DAFB?logo=react)
+  ![Redis](https://img.shields.io/badge/Redis-7+-DC382D?logo=redis)
+  ![License](https://img.shields.io/badge/license-MIT-green.svg)
+</div>
 
 **TUYUL** is a professional-grade, multi-user cryptocurrency trading bot for Indodax exchange with automated trading capabilities, real-time market analysis, and comprehensive order management.
 
