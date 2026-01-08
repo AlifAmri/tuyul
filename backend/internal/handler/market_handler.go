@@ -24,7 +24,7 @@ func NewMarketHandler(marketService *market.MarketDataService) *MarketHandler {
 
 // GetSummary returns all market summaries
 func (h *MarketHandler) GetSummary(c *gin.Context) {
-	limitStr := c.DefaultQuery("limit", "50")
+	limitStr := c.DefaultQuery("limit", "0")
 	limit, _ := strconv.Atoi(limitStr)
 	if limit > 200 {
 		limit = 200
@@ -48,10 +48,10 @@ func (h *MarketHandler) GetSummary(c *gin.Context) {
 
 // GetPumpScores returns markets sorted by pump score
 func (h *MarketHandler) GetPumpScores(c *gin.Context) {
-	limitStr := c.DefaultQuery("limit", "20")
+	limitStr := c.DefaultQuery("limit", "0")
 	limit, _ := strconv.Atoi(limitStr)
 
-	minVolStr := c.DefaultQuery("min_volume", "1000000")
+	minVolStr := c.DefaultQuery("min_volume", "0")
 	minVol, _ := strconv.ParseFloat(minVolStr, 64)
 
 	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.PumpScoreRankKey(), limit, minVol)
@@ -66,14 +66,16 @@ func (h *MarketHandler) GetPumpScores(c *gin.Context) {
 	})
 }
 
-// GetGaps returns markets sorted by gap percentage
+// GetGaps returns markets sorted by gap percentage (High to Low)
 func (h *MarketHandler) GetGaps(c *gin.Context) {
-	limitStr := c.DefaultQuery("limit", "20")
+	limitStr := c.DefaultQuery("limit", "0")
 	limit, _ := strconv.Atoi(limitStr)
 
-	minVolStr := c.DefaultQuery("min_volume", "10000000")
+	// Lower default volume to see more results during dev/testing
+	minVolStr := c.DefaultQuery("min_volume", "0") // 0 IDR
 	minVol, _ := strconv.ParseFloat(minVolStr, 64)
 
+	// Fetch coins sorted by gap (ZRevRange gets highest scores first)
 	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.GapRankKey(), limit, minVol)
 	if err != nil {
 		util.SendError(c, err)

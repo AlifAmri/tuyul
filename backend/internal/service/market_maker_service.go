@@ -107,12 +107,14 @@ func (s *MarketMakerService) CreateBot(ctx context.Context, userID string, req *
 		MinGapPercent:              req.MinGapPercent,
 		RepositionThresholdPercent: req.RepositionThresholdPercent,
 		MaxLossIDR:                 req.MaxLossIDR,
-		Balances: map[string]float64{
-			"idr": req.InitialBalanceIDR,
-		},
-		Status:    model.BotStatusStopped,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Status:                     model.BotStatusStopped,
+		CreatedAt:                  time.Now(),
+		UpdatedAt:                  time.Now(),
+	}
+
+	// Initialize base currency balance to 0 so it shows up in UI
+	if pairInfo, ok := s.marketDataService.GetPairInfo(req.Pair); ok {
+		bot.Balances[pairInfo.BaseCurrency] = 0
 	}
 
 	// 4. Save to repository

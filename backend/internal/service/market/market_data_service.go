@@ -491,7 +491,11 @@ func (s *MarketDataService) GetCoin(ctx context.Context, pairID string) (*model.
 // GetSortedCoins retrieves a list of coins from a sorted set
 func (s *MarketDataService) GetSortedCoins(ctx context.Context, sortKey string, limit int, minVolume float64) ([]*model.Coin, error) {
 	// Get pair IDs from sorted set
-	pairIDs, err := s.redisClient.ZRevRange(ctx, sortKey, 0, int64(limit-1))
+	stop := int64(limit - 1)
+	if limit <= 0 {
+		stop = -1 // Get all
+	}
+	pairIDs, err := s.redisClient.ZRevRange(ctx, sortKey, 0, stop)
 	if err != nil {
 		return nil, err
 	}
@@ -503,7 +507,9 @@ func (s *MarketDataService) GetSortedCoins(ctx context.Context, sortKey string, 
 			continue
 		}
 
-		if coin.VolumeIDR >= minVolume {
+		// Filter: Only exclude if NO volume (VolumeIDR <= 0)
+		// We trust the minVolume param from handler if provided, otherwise standard is > 0
+		if coin.VolumeIDR > 0 && coin.VolumeIDR >= minVolume {
 			coins = append(coins, coin)
 		}
 	}
@@ -543,6 +549,30 @@ func (s *MarketDataService) updateGapsFromREST() {
 		// Update bid/ask
 		bestBid, _ := strconv.ParseFloat(detail.Buy, 64)
 		bestAsk, _ := strconv.ParseFloat(detail.Sell, 64)
+		lastPrice, _ := strconv.ParseFloat(detail.Last, 64)
+		volIDR, _ := strconv.ParseFloat(detail.VolIDR, 64)
+		high, _ := strconv.ParseFloat(detail.High, 64)
+		low, _ := strconv.ParseFloat(detail.Low, 64)
+
+		changed := false
+
+		// Check Prices
+		if coin.CurrentPrice != lastPrice && lastPrice > 0 {
+			coin.CurrentPrice = lastPrice
+			changed = true
+		}
+		if coin.VolumeIDR != volIDR && volIDR > 0 {
+			coin.VolumeIDR = volIDR
+			changed = true
+		}
+		if coin.High24h != high {
+			coin.High24h = high
+			changed = true
+		}
+		if coin.Low24h != low {
+			coin.Low24h = low
+			changed = true
+		}
 
 		// Only save and process if data is fresh or has changed
 		if coin.BestBid != bestBid || coin.BestAsk != bestAsk {
@@ -551,6 +581,16 @@ func (s *MarketDataService) updateGapsFromREST() {
 
 			// Recalculate gap
 			CalculateGap(coin)
+			changed = true
+		}
+
+		if changed {
+			coin.LastUpdate = time.Now()
+			// Update Timeframes slightly (just to ensure price is tracked)
+			s.updateTimeframes(coin, coin.CurrentPrice)
+
+			// Recalculate Pump Score if volume/price changed
+			coin.PumpScore = CalculatePumpScore(coin)
 
 			// Save to Cache & Redis
 			s.coinCache.Store(pairID, coin)

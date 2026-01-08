@@ -53,4 +53,13 @@ func main() {
 	pairsKey := redis.CachePairsKey()
 	exists, _ := redisClient.Exists(ctx, pairsKey)
 	fmt.Printf("Metadata Pairs Key (%s) exists: %v\n", pairsKey, exists)
+
+	// DEBUG: Check specific coin cstidr
+	cstKey := redis.CoinKey("cstidr")
+	cstExists, _ := redisClient.Exists(ctx, cstKey)
+	fmt.Printf("Coin Key (%s) exists: %v\n", cstKey, cstExists)
+	if cstExists {
+		data, _ := redisClient.HGetAll(ctx, cstKey)
+		fmt.Printf("Data for cstidr: %+v\n", data)
+	}
 }
