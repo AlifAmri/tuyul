@@ -208,22 +208,67 @@ func (h *WSHub) StartPubSubListener(ctx context.Context) {
 	userPattern := redisHelper.GetWSUserKey("*")
 	userPrefix := redisHelper.GetWSUserKey("")
 
-	pubsub := h.redisClient.Subscribe(ctx, broadcastKey, userPattern)
-	defer pubsub.Close()
+	// Use PSubscribe for pattern matching (wildcard support)
+	// Note: We need to subscribe to broadcast channel separately, then pattern subscribe to user channels
+	// PSubscribe only works with patterns, not exact channel names
+	broadcastPubsub := h.redisClient.Subscribe(ctx, broadcastKey)
+	userPubsub := h.redisClient.PSubscribe(ctx, userPattern)
+	
+	// Use a single channel to receive from both
+	type pubSubMessage struct {
+		channel string
+		payload string
+	}
+	msgChan := make(chan pubSubMessage, 100)
+	
+	// Forward broadcast messages
+	go func() {
+		ch := broadcastPubsub.Channel()
+		for msg := range ch {
+			msgChan <- pubSubMessage{channel: msg.Channel, payload: msg.Payload}
+		}
+	}()
+	
+	// Forward user pattern messages
+	go func() {
+		ch := userPubsub.Channel()
+		for msg := range ch {
+			msgChan <- pubSubMessage{channel: msg.Channel, payload: msg.Payload}
+		}
+	}()
+	
+	defer func() {
+		broadcastPubsub.Close()
+		userPubsub.Close()
+	}()
 
-	ch := pubsub.Channel()
+	h.log.Infof("WS PubSub listener started - listening to broadcast: %s, user pattern: %s", broadcastKey, userPattern)
 
-	for msg := range ch {
-		if msg.Channel == broadcastKey {
+	for msg := range msgChan {
+		h.log.Debugf("WS PubSub received message on channel: %s", msg.channel)
+		
+		if msg.channel == broadcastKey {
 			var wsMsg model.WSMessage
-			if err := json.Unmarshal([]byte(msg.Payload), &wsMsg); err == nil {
+			if err := json.Unmarshal([]byte(msg.payload), &wsMsg); err == nil {
+				h.log.Debugf("WS Broadcasting message type: %s", wsMsg.Type)
 				h.Broadcast(wsMsg)
+			} else {
+				h.log.Errorf("WS Failed to unmarshal broadcast message: %v", err)
 			}
-		} else if len(msg.Channel) > len(userPrefix) && msg.Channel[:len(userPrefix)] == userPrefix {
-			userID := msg.Channel[len(userPrefix):]
-			var wsMsg model.WSMessage
-			if err := json.Unmarshal([]byte(msg.Payload), &wsMsg); err == nil {
-				h.SendToUser(userID, wsMsg)
+		} else {
+			// This is a user-specific message (from PSubscribe pattern)
+			// Extract userID from channel name (e.g., "ws:user:123" -> "123")
+			if len(msg.channel) > len(userPrefix) && msg.channel[:len(userPrefix)] == userPrefix {
+				userID := msg.channel[len(userPrefix):]
+				var wsMsg model.WSMessage
+				if err := json.Unmarshal([]byte(msg.payload), &wsMsg); err == nil {
+					h.log.Debugf("WS Sending message type %s to user: %s", wsMsg.Type, userID)
+					h.SendToUser(userID, wsMsg)
+				} else {
+					h.log.Errorf("WS Failed to unmarshal user message for %s: %v", userID, err)
+				}
+			} else {
+				h.log.Warnf("WS Received message on unknown channel: %s", msg.channel)
 			}
 		}
 	}

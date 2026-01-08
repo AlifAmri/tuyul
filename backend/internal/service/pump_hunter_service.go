@@ -145,12 +145,18 @@ func (s *PumpHunterService) StartBot(ctx context.Context, userID string, botID i
 	}
 
 	bot.Status = model.BotStatusRunning
+	inst.Config.Status = model.BotStatusRunning // Update in-memory status
 	s.botRepo.UpdateStatus(ctx, botID, model.BotStatusRunning, nil)
 
 	// Notify via WebSocket
 	s.notificationService.NotifyBotUpdate(ctx, userID, model.WSBotUpdatePayload{
-		BotID:  botID,
-		Status: model.BotStatusRunning,
+		BotID:          botID,
+		Status:         model.BotStatusRunning,
+		TotalTrades:    bot.TotalTrades,
+		WinningTrades:  bot.WinningTrades,
+		WinRate:        bot.WinRate(),
+		TotalProfitIDR: bot.TotalProfitIDR,
+		Balances:       bot.Balances,
 	})
 
 	s.log.Infof("Pump Hunter Bot %d started", botID)
@@ -187,6 +193,7 @@ func (s *PumpHunterService) CreateBot(ctx context.Context, userID string, req *m
 		UserID:            userID,
 		Name:              req.Name,
 		Type:              model.BotTypePumpHunter,
+		Pair:              "ALL", // Pump hunter scans all pairs
 		IsPaperTrading:    req.IsPaperTrading,
 		APIKeyID:          apiKeyID,
 		EntryRules:        req.EntryRules,
@@ -196,14 +203,28 @@ func (s *PumpHunterService) CreateBot(ctx context.Context, userID string, req *m
 		Balances:          make(map[string]float64),
 	}
 
-	// Initial balance for paper trading
+	// 4. Initialize balances properly
+	// For Pump Hunter: always set IDR balance, coin balances will be managed per position
 	if req.IsPaperTrading {
-		bot.Balances["idr"] = req.RiskManagement.MinBalanceIDR + req.RiskManagement.MaxPositionIDR*2 // arbitrary initial
+		// Paper trading: set IDR balance from InitialBalanceIDR
+		bot.Balances["idr"] = req.InitialBalanceIDR
+		s.log.Infof("Pump Hunter bot created (paper): IDR=%.2f", req.InitialBalanceIDR)
+	} else {
+		// Live trading: set IDR balance (will sync from Indodax on start)
+		bot.Balances["idr"] = req.InitialBalanceIDR
+		s.log.Infof("Pump Hunter bot created (live): IDR=%.2f (will sync from Indodax on start)", 
+			req.InitialBalanceIDR)
 	}
+	// Note: Pump Hunter doesn't have a single coin balance since it trades multiple pairs
+	// Coin balances are managed per position
 
+	// 5. Save to repository
 	if err := s.botRepo.Create(ctx, bot); err != nil {
 		return nil, err
 	}
+
+	s.log.Infof("Pump Hunter bot created successfully: ID=%d, Name=%s, PaperTrading=%v", 
+		bot.ID, bot.Name, bot.IsPaperTrading)
 
 	return bot, nil
 }
@@ -279,6 +300,49 @@ func (s *PumpHunterService) DeleteBot(ctx context.Context, userID string, botID 
 		return err
 	}
 
+	// Delete all orders and positions associated with this bot
+	// First, get all positions for this bot
+	positions, err := s.posRepo.ListByBot(ctx, botID)
+	if err != nil {
+		s.log.Warnf("Failed to list positions for bot %d: %v", botID, err)
+	} else {
+		// Delete orders for each position, then delete the position
+		for _, pos := range positions {
+			// Delete orders for this position
+			posOrders, err := s.orderRepo.ListByParentAndUser(ctx, userID, "position", pos.ID)
+			if err != nil {
+				s.log.Warnf("Failed to list orders for position %d: %v", pos.ID, err)
+			} else {
+				for _, order := range posOrders {
+					if err := s.orderRepo.Delete(ctx, order.ID); err != nil {
+						s.log.Warnf("Failed to delete order %d for position %d: %v", order.ID, pos.ID, err)
+					}
+				}
+			}
+			
+			// Delete the position itself
+			if err := s.posRepo.Delete(ctx, pos.ID); err != nil {
+				s.log.Warnf("Failed to delete position %d: %v", pos.ID, err)
+			}
+		}
+		s.log.Infof("Deleted %d positions and their orders for bot %d", len(positions), botID)
+	}
+
+	// Also delete any orders directly associated with the bot (if any)
+	botOrders, err := s.orderRepo.ListByParentAndUser(ctx, userID, "bot", botID)
+	if err != nil {
+		s.log.Warnf("Failed to list direct orders for bot %d: %v", botID, err)
+	} else {
+		for _, order := range botOrders {
+			if err := s.orderRepo.Delete(ctx, order.ID); err != nil {
+				s.log.Warnf("Failed to delete order %d for bot %d: %v", order.ID, botID, err)
+			}
+		}
+		if len(botOrders) > 0 {
+			s.log.Infof("Deleted %d direct orders for bot %d", len(botOrders), botID)
+		}
+	}
+
 	return s.botRepo.Delete(ctx, bot.ID)
 }
 
@@ -306,16 +370,63 @@ func (s *PumpHunterService) StopBot(ctx context.Context, userID string, botID in
 		return util.ErrForbidden("Access denied")
 	}
 
+	// Cancel any open orders for this bot
+	// Get all positions for this bot
+	positions, err := s.posRepo.ListByBot(ctx, botID)
+	if err == nil {
+		for _, pos := range positions {
+			// Get orders for this position
+			posOrders, err := s.orderRepo.ListByParentAndUser(ctx, userID, "position", pos.ID)
+			if err == nil {
+				for _, order := range posOrders {
+					if order.Status == "open" {
+						s.log.Infof("Bot %d: Cancelling open order %d (ID: %s) for position %d", botID, order.ID, order.OrderID, pos.ID)
+						if err := inst.TradeClient.CancelOrder(ctx, order.Pair, order.OrderID, order.Side); err != nil {
+							s.log.Warnf("Bot %d: Failed to cancel order %d: %v", botID, order.ID, err)
+						} else {
+							s.orderRepo.UpdateStatus(ctx, order.ID, "cancelled")
+							order.Status = "cancelled"
+							s.notificationService.NotifyOrderUpdate(ctx, userID, order)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Also check for any direct bot orders
+	botOrders, err := s.orderRepo.ListByParentAndUser(ctx, userID, "bot", botID)
+	if err == nil {
+		for _, order := range botOrders {
+			if order.Status == "open" {
+				s.log.Infof("Bot %d: Cancelling open order %d (ID: %s)", botID, order.ID, order.OrderID)
+				if err := inst.TradeClient.CancelOrder(ctx, order.Pair, order.OrderID, order.Side); err != nil {
+					s.log.Warnf("Bot %d: Failed to cancel order %d: %v", botID, order.ID, err)
+				} else {
+					s.orderRepo.UpdateStatus(ctx, order.ID, "cancelled")
+					order.Status = "cancelled"
+					s.notificationService.NotifyOrderUpdate(ctx, userID, order)
+				}
+			}
+		}
+	}
+
 	close(inst.StopChan)
 	delete(s.instances, botID)
 
 	inst.Config.Status = model.BotStatusStopped
-	err := s.botRepo.UpdateStatus(ctx, botID, model.BotStatusStopped, nil)
+	err = s.botRepo.UpdateStatus(ctx, botID, model.BotStatusStopped, nil)
 
 	// Notify via WebSocket
+	stoppedBot, _ := s.botRepo.GetByID(ctx, botID)
 	s.notificationService.NotifyBotUpdate(ctx, userID, model.WSBotUpdatePayload{
-		BotID:  botID,
-		Status: model.BotStatusStopped,
+		BotID:          botID,
+		Status:         model.BotStatusStopped,
+		TotalTrades:    stoppedBot.TotalTrades,
+		WinningTrades:  stoppedBot.WinningTrades,
+		WinRate:        stoppedBot.WinRate(),
+		TotalProfitIDR: stoppedBot.TotalProfitIDR,
+		Balances:       stoppedBot.Balances,
 	})
 
 	return err
@@ -329,6 +440,10 @@ func (s *PumpHunterService) runBot(inst *PumpHunterInstance) {
 	signalTicker := time.NewTicker(1 * time.Second)
 	defer signalTicker.Stop()
 
+	// Ticker for max loss check
+	maxLossTicker := time.NewTicker(5 * time.Second)
+	defer maxLossTicker.Stop()
+
 	for {
 		select {
 		case <-inst.StopChan:
@@ -337,6 +452,23 @@ func (s *PumpHunterService) runBot(inst *PumpHunterInstance) {
 			s.monitorExits(inst)
 		case <-signalTicker.C:
 			s.processSignals(inst)
+		case <-maxLossTicker.C:
+			// Periodic check for max loss limit
+			inst.mu.RLock()
+			config := inst.Config
+			inst.mu.RUnlock()
+			
+			if config.TotalProfitIDR <= -config.MaxLossIDR {
+				s.log.Warnf("Bot %d reached total max loss limit (%.2f <= -%.2f), stopping bot", 
+					config.ID, config.TotalProfitIDR, config.MaxLossIDR)
+				ctx := context.Background()
+				go func() {
+					if err := s.StopBot(ctx, config.UserID, config.ID); err != nil {
+						s.log.Errorf("Failed to stop bot %d after max loss: %v", config.ID, err)
+					}
+				}()
+				return
+			}
 		}
 	}
 }
@@ -419,7 +551,15 @@ func (s *PumpHunterService) checkEntryConditions(inst *PumpHunterInstance, coin 
 	// 0. Risk Management Checks
 	// 0.1 Circuit Breaker (Total Loss)
 	if config.TotalProfitIDR <= -config.MaxLossIDR {
-		s.log.Warnf("Bot %d reached total max loss limit", config.ID)
+		s.log.Warnf("Bot %d reached total max loss limit (%.2f <= -%.2f), stopping bot", 
+			config.ID, config.TotalProfitIDR, config.MaxLossIDR)
+		// Stop the bot asynchronously
+		ctx := context.Background()
+		go func() {
+			if err := s.StopBot(ctx, config.UserID, config.ID); err != nil {
+				s.log.Errorf("Failed to stop bot %d after max loss: %v", config.ID, err)
+			}
+		}()
 		return false
 	}
 
@@ -608,6 +748,18 @@ func (s *PumpHunterService) openPosition(inst *PumpHunterInstance, coin *model.C
 	s.botRepo.UpdateBalance(ctx, inst.Config.ID, inst.Config.Balances)
 
 	s.log.Infof("Bot %d opened position on %s: %.8f @ %.2f", inst.Config.ID, coin.PairID, amount, price)
+	
+	// Notify order creation and bot update via WebSocket
+	s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, order)
+	s.notificationService.NotifyBotUpdate(ctx, inst.Config.UserID, model.WSBotUpdatePayload{
+		BotID:          inst.Config.ID,
+		Status:         inst.Config.Status,
+		TotalTrades:    inst.Config.TotalTrades,
+		WinningTrades:  inst.Config.WinningTrades,
+		WinRate:        inst.Config.WinRate(),
+		TotalProfitIDR: inst.Config.TotalProfitIDR,
+		Balances:       inst.Config.Balances,
+	})
 
 	// Notify via WebSocket
 	s.notificationService.NotifyBotUpdate(ctx, inst.Config.UserID, model.WSBotUpdatePayload{
@@ -615,7 +767,9 @@ func (s *PumpHunterService) openPosition(inst *PumpHunterInstance, coin *model.C
 		Status:         inst.Config.Status,
 		TotalTrades:    inst.Config.TotalTrades,
 		WinningTrades:  inst.Config.WinningTrades,
+		WinRate:        inst.Config.WinRate(),
 		TotalProfitIDR: inst.Config.TotalProfitIDR,
+		Balances:       inst.Config.Balances,
 	})
 }
 
@@ -721,6 +875,9 @@ func (s *PumpHunterService) closePosition(inst *PumpHunterInstance, pos *model.P
 	s.posRepo.Update(ctx, pos)
 
 	s.log.Infof("Bot %d closing position on %s: reason=%s, price=%.2f", inst.Config.ID, pos.Pair, reason, price)
+	
+	// Notify order creation via WebSocket
+	s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, order)
 }
 
 func (s *PumpHunterService) handleOrderFilled(inst *PumpHunterInstance, order *model.Order) {
@@ -744,11 +901,17 @@ func (s *PumpHunterService) handleOrderFilled(inst *PumpHunterInstance, order *m
 	if order.Side == "buy" {
 		targetPos.Status = model.PositionStatusOpen
 		s.posRepo.Update(ctx, targetPos)
+		
+		// Notify order filled via WebSocket
+		order.Status = "filled"
+		s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, order)
 
 		// Update balance with actual if needed (sync)
 		// For now we assume size was already deducted
 	} else {
 		// Finalize close
+		order.Status = "filled"
+		s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, order)
 		s.finalizePositionClose(inst, targetPos, order.Price)
 	}
 }
@@ -789,13 +952,28 @@ func (s *PumpHunterService) finalizePositionClose(inst *PumpHunterInstance, pos 
 	delete(inst.OpenPositions, pos.ID)
 	s.log.Infof("Bot %d closed position on %s: profit=%.2f (%.2f%%)", inst.Config.ID, pos.Pair, profitIDR, profitPct)
 
+	// Check if max loss limit reached after this trade
+	if inst.Config.TotalProfitIDR <= -inst.Config.MaxLossIDR {
+		s.log.Warnf("Bot %d reached total max loss limit (%.2f <= -%.2f), stopping bot", 
+			inst.Config.ID, inst.Config.TotalProfitIDR, inst.Config.MaxLossIDR)
+		// Stop the bot
+		go func() {
+			if err := s.StopBot(ctx, inst.Config.UserID, inst.Config.ID); err != nil {
+				s.log.Errorf("Failed to stop bot %d after max loss: %v", inst.Config.ID, err)
+			}
+		}()
+		return
+	}
+
 	// Notify via WebSocket
 	s.notificationService.NotifyBotUpdate(ctx, inst.Config.UserID, model.WSBotUpdatePayload{
 		BotID:          inst.Config.ID,
 		Status:         inst.Config.Status,
 		TotalTrades:    inst.Config.TotalTrades,
 		WinningTrades:  inst.Config.WinningTrades,
+		WinRate:        inst.Config.WinRate(),
 		TotalProfitIDR: inst.Config.TotalProfitIDR,
+		Balances:       inst.Config.Balances,
 	})
 }
 

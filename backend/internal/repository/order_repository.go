@@ -3,7 +3,9 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -21,6 +23,11 @@ func NewOrderRepository(redisClient *redis.Client) *OrderRepository {
 	return &OrderRepository{
 		redis: redisClient,
 	}
+}
+
+// GetRedisClient returns the underlying Redis client (for pipeline operations)
+func (r *OrderRepository) GetRedisClient() *redis.Client {
+	return r.redis
 }
 
 // Create creates a new order
@@ -71,6 +78,28 @@ func (r *OrderRepository) Create(ctx context.Context, order *model.Order) error 
 	if order.OrderID != "" {
 		mapKey := redis.OrderIDMapKey(order.OrderID)
 		err = r.redis.Set(ctx, mapKey, orderIDStr, 0)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Add to parent index (sorted set by CreatedAt timestamp for efficient querying)
+	createdAtScore := float64(order.CreatedAt.UnixMilli())
+	if order.ParentType == "bot" {
+		botOrdersKey := redis.BotOrdersKey(order.ParentID)
+		err := r.redis.ZAdd(ctx, botOrdersKey, redis.Z{
+			Score:  createdAtScore,
+			Member: orderIDStr,
+		})
+		if err != nil {
+			return err
+		}
+	} else if order.ParentType == "position" {
+		posOrdersKey := redis.PositionOrdersKey(order.ParentID)
+		err := r.redis.ZAdd(ctx, posOrdersKey, redis.Z{
+			Score:  createdAtScore,
+			Member: orderIDStr,
+		})
 		if err != nil {
 			return err
 		}
@@ -201,6 +230,161 @@ func (r *OrderRepository) ListByStatus(ctx context.Context, status string) ([]*m
 	return orders, nil
 }
 
+// ListByParent retrieves all orders for a specific parent (bot or position)
+func (r *OrderRepository) ListByParent(ctx context.Context, parentType string, parentID int64) ([]*model.Order, error) {
+	// Get all orders for the user first (we need to scan)
+	// Since we don't have a parent index, we'll filter by parent
+	// For now, we'll get user's orders and filter
+	// TODO: Add parent index for better performance if needed
+
+	// This is not optimal - ideally we'd have a parent index
+	// But for now we'll iterate through user's orders
+	// We need userID - let's change approach
+
+	// Better approach: Get order IDs from a pattern scan
+	// But Redis doesn't allow complex queries easily
+
+	// Alternative: Return empty for now and build index on write
+	// For this implementation, we'll scan user orders
+	// Since we have the parent, let's get the user first
+
+	return nil, fmt.Errorf("not implemented - need user context")
+}
+
+// ListByParentAndUser retrieves orders by parent and user
+// If limit > 0, returns only the most recent 'limit' orders
+func (r *OrderRepository) ListByParentAndUser(ctx context.Context, userID string, parentType string, parentID int64, limit int) ([]*model.Order, error) {
+	var orderIDs []string
+	var err error
+
+	// Use sorted set index if available (much faster for limited queries)
+	if parentType == "bot" {
+		botOrdersKey := redis.BotOrdersKey(parentID)
+		// Get most recent orders (highest score = most recent timestamp)
+		// ZRevRange gets highest scores first (most recent)
+		orderIDs, err = r.redis.ZRevRange(ctx, botOrdersKey, 0, int64(limit-1))
+		if err != nil {
+			return nil, err
+		}
+	} else if parentType == "position" {
+		posOrdersKey := redis.PositionOrdersKey(parentID)
+		orderIDs, err = r.redis.ZRevRange(ctx, posOrdersKey, 0, int64(limit-1))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Fallback: if sorted set is empty or doesn't exist, use old method
+	if len(orderIDs) == 0 {
+		userOrdersKey := redis.UserOrdersKey(userID)
+		allOrderIDs, err := r.redis.SMembers(ctx, userOrdersKey)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(allOrderIDs) == 0 {
+			return []*model.Order{}, nil
+		}
+
+		// Use pipeline to batch fetch all orders at once
+		pipe := r.redis.GetClient().Pipeline()
+		cmds := make(map[string]*redislib.StringCmd)
+		
+		for _, idStr := range allOrderIDs {
+			orderKey := redis.OrderKey(idStr)
+			cmds[idStr] = pipe.Get(ctx, orderKey)
+		}
+		
+		_, err = pipe.Exec(ctx)
+		if err != nil && err != redislib.Nil {
+			return nil, err
+		}
+
+		// Parse results and filter by parent
+		orders := make([]*model.Order, 0)
+		for _, idStr := range allOrderIDs {
+			cmd := cmds[idStr]
+			if cmd == nil {
+				continue
+			}
+			
+			val, err := cmd.Result()
+			if err != nil {
+				if err == redislib.Nil {
+					continue
+				}
+				return nil, err
+			}
+			
+			var order model.Order
+			if err := json.Unmarshal([]byte(val), &order); err != nil {
+				continue
+			}
+			
+			if order.ParentType == parentType && order.ParentID == parentID {
+				orders = append(orders, &order)
+			}
+		}
+
+		// Sort and limit
+		if limit > 0 && len(orders) > limit {
+			sort.Slice(orders, func(i, j int) bool {
+				if orders[i].CreatedAt.Equal(orders[j].CreatedAt) {
+					return orders[i].ID > orders[j].ID
+				}
+				return orders[i].CreatedAt.After(orders[j].CreatedAt)
+			})
+			orders = orders[:limit]
+		}
+
+		return orders, nil
+	}
+
+	// Fetch orders using pipeline (only the ones we need)
+	if len(orderIDs) == 0 {
+		return []*model.Order{}, nil
+	}
+
+	pipe := r.redis.GetClient().Pipeline()
+	cmds := make(map[string]*redislib.StringCmd)
+	
+	for _, idStr := range orderIDs {
+		orderKey := redis.OrderKey(idStr)
+		cmds[idStr] = pipe.Get(ctx, orderKey)
+	}
+	
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redislib.Nil {
+		return nil, err
+	}
+
+	// Parse results
+	orders := make([]*model.Order, 0, len(orderIDs))
+	for _, idStr := range orderIDs {
+		cmd := cmds[idStr]
+		if cmd == nil {
+			continue
+		}
+		
+		val, err := cmd.Result()
+		if err != nil {
+			if err == redislib.Nil {
+				continue
+			}
+			return nil, err
+		}
+		
+		var order model.Order
+		if err := json.Unmarshal([]byte(val), &order); err != nil {
+			continue
+		}
+		
+		orders = append(orders, &order)
+	}
+
+	return orders, nil
+}
+
 // Delete deletes an order
 func (r *OrderRepository) Delete(ctx context.Context, orderID int64) error {
 	order, err := r.GetByID(ctx, orderID)
@@ -234,6 +418,15 @@ func (r *OrderRepository) Delete(ctx context.Context, orderID int64) error {
 	if order.OrderID != "" {
 		mapKey := redis.OrderIDMapKey(order.OrderID)
 		r.redis.Del(ctx, mapKey)
+	}
+
+	// Remove from parent sorted set index
+	if order.ParentType == "bot" {
+		botOrdersKey := redis.BotOrdersKey(order.ParentID)
+		r.redis.ZRem(ctx, botOrdersKey, orderIDStr)
+	} else if order.ParentType == "position" {
+		posOrdersKey := redis.PositionOrdersKey(order.ParentID)
+		r.redis.ZRem(ctx, posOrdersKey, orderIDStr)
 	}
 
 	return nil

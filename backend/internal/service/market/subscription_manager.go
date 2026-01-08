@@ -3,6 +3,7 @@ package market
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"tuyul/backend/pkg/indodax"
@@ -38,8 +39,8 @@ func NewSubscriptionManager(wsClient *indodax.WSClient) *SubscriptionManager {
 		refCount:    make(map[string]int),
 	}
 
-	// Set message handler on WSClient
-	wsClient.SetMessageHandler(sm.handleWSMessage)
+	// Add message handler on WSClient (don't replace existing handlers)
+	wsClient.AddMessageHandler(sm.handleWSMessage)
 
 	return sm
 }
@@ -56,8 +57,11 @@ func (sm *SubscriptionManager) Subscribe(pair string, handler TickerHandler) err
 		if err := sm.wsClient.Connect(); err != nil {
 			return fmt.Errorf("failed to connect ws: %w", err)
 		}
+		sm.log.Infof("SubscriptionManager: Subscribing to order-book channel: %s for pair: %s", channel, pair)
 		sm.wsClient.Subscribe(channel)
-		sm.log.Infof("Subscribed to WebSocket channel: %s", channel)
+		sm.log.Infof("SubscriptionManager: Subscribe() called for channel: %s", channel)
+	} else {
+		sm.log.Debugf("SubscriptionManager: Pair %s already has %d subscribers, skipping subscription", pair, sm.refCount[pair])
 	}
 
 	sm.subscribers[pair] = append(sm.subscribers[pair], handler)
@@ -95,12 +99,44 @@ func (sm *SubscriptionManager) Unsubscribe(pair string, handler TickerHandler) {
 func (sm *SubscriptionManager) handleWSMessage(channel string, data []byte) {
 	// We only care about order-book channels
 	// Format: market:order-book-btcidr
-	var pair string
-	if n, err := fmt.Sscanf(channel, "market:order-book-%s", &pair); err != nil || n != 1 {
+	// Early return for non-order-book channels to avoid unnecessary processing
+	if !strings.HasPrefix(channel, "market:order-book-") {
 		return
 	}
 
+	sm.log.Infof("SubscriptionManager: Received order-book message on channel: %s (data length: %d bytes)", channel, len(data))
+
+	var pair string
+	if n, err := fmt.Sscanf(channel, "market:order-book-%s", &pair); err != nil || n != 1 {
+		sm.log.Errorf("SubscriptionManager: Failed to extract pair from channel %s: %v", channel, err)
+		return
+	}
+	sm.log.Infof("SubscriptionManager: Processing orderbook for pair: %s", pair)
+
 	// Parse orderbook data
+	// According to Indodax docs, the structure is:
+	// {
+	//   "result": {
+	//     "channel": "market:order-book-btcidr",
+	//     "data": {
+	//       "data": {
+	//         "pair": "btcidr",
+	//         "ask": [...],
+	//         "bid": [...]
+	//       },
+	//       "offset": 67409
+	//     }
+	//   }
+	// }
+	// The ws_client already extracts result.data, so we receive:
+	// {
+	//   "data": {
+	//     "pair": "btcidr",
+	//     "ask": [...],
+	//     "bid": [...]
+	//   },
+	//   "offset": 67409
+	// }
 	var obData struct {
 		Data struct {
 			Pair string `json:"pair"`
@@ -111,21 +147,29 @@ func (sm *SubscriptionManager) handleWSMessage(channel string, data []byte) {
 				Price string `json:"price"`
 			} `json:"bid"`
 		} `json:"data"`
+		Offset int64 `json:"offset"`
 	}
 
 	if err := json.Unmarshal(data, &obData); err != nil {
-		sm.log.Errorf("Failed to unmarshal orderbook data for %s: %v", pair, err)
+		sm.log.Errorf("Failed to unmarshal orderbook data for %s: %v. Raw data: %s", pair, err, string(data))
 		return
 	}
 
 	if len(obData.Data.Ask) == 0 || len(obData.Data.Bid) == 0 {
+		sm.log.Debugf("SubscriptionManager: Empty orderbook for %s (ask=%d bid=%d)", pair, len(obData.Data.Ask), len(obData.Data.Bid))
 		return
 	}
 
-	// Parse best prices
+	// Parse best prices (first element in ask/bid arrays is the best price)
 	var bestAsk, bestBid float64
-	fmt.Sscanf(obData.Data.Ask[0].Price, "%f", &bestAsk)
-	fmt.Sscanf(obData.Data.Bid[0].Price, "%f", &bestBid)
+	if _, err := fmt.Sscanf(obData.Data.Ask[0].Price, "%f", &bestAsk); err != nil {
+		sm.log.Errorf("Failed to parse ask price for %s: %v", pair, err)
+		return
+	}
+	if _, err := fmt.Sscanf(obData.Data.Bid[0].Price, "%f", &bestBid); err != nil {
+		sm.log.Errorf("Failed to parse bid price for %s: %v", pair, err)
+		return
+	}
 
 	ticker := OrderBookTicker{
 		Pair:    pair,
@@ -138,6 +182,7 @@ func (sm *SubscriptionManager) handleWSMessage(channel string, data []byte) {
 	handlers := sm.subscribers[pair]
 	sm.mu.RUnlock()
 
+	sm.log.Debugf("SubscriptionManager: Notifying %d handlers for pair %s (bid=%.2f ask=%.2f)", len(handlers), pair, bestBid, bestAsk)
 	for _, handler := range handlers {
 		handler(ticker)
 	}

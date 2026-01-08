@@ -142,7 +142,7 @@ func main() {
 	// Initialize Pump Hunter service
 	phService := service.NewPumpHunterService(botRepo, posRepo, orderRepo, apiKeyService, marketDataService, orderMonitor, notificationService, indodaxClient)
 
-	botHandler := handler.NewBotHandler(botRepo, mmService, phService)
+	botHandler := handler.NewBotHandler(botRepo, orderRepo, mmService, phService)
 
 	// Register Pump Signal Notifications
 	marketDataService.OnUpdate(func(coin *model.Coin) {
@@ -178,6 +178,54 @@ func main() {
 
 	// Start monitors
 	stopLossMonitor.Start()
+
+	// Restore running bots after server restart
+	go func() {
+		ctx := context.Background()
+		log.Info("Restoring running bots after server restart...")
+		
+		// Get all running bots
+		runningBots, err := botRepo.ListByStatus(ctx, model.BotStatusRunning)
+		if err != nil {
+			log.Errorf("Failed to list running bots: %v", err)
+			return
+		}
+		
+		log.Infof("Found %d running bot(s) to restore", len(runningBots))
+		
+		for _, bot := range runningBots {
+			log.Infof("Restoring bot %d (Type: %s, Pair: %s, User: %s)", 
+				bot.ID, bot.Type, bot.Pair, bot.UserID)
+			
+			// Temporarily set status to stopped so StartBot can proceed
+			// (StartBot checks if status is already running and returns error)
+			if err := botRepo.UpdateStatus(ctx, bot.ID, model.BotStatusStopped, nil); err != nil {
+				log.Errorf("Failed to reset status for bot %d: %v", bot.ID, err)
+				continue
+			}
+			
+			var err error
+			if bot.Type == model.BotTypeMarketMaker {
+				err = mmService.StartBot(ctx, bot.UserID, bot.ID)
+			} else if bot.Type == model.BotTypePumpHunter {
+				err = phService.StartBot(ctx, bot.UserID, bot.ID)
+			} else {
+				log.Warnf("Unknown bot type %s for bot %d, skipping", bot.Type, bot.ID)
+				// Set status back to running since we're not handling it
+				botRepo.UpdateStatus(ctx, bot.ID, model.BotStatusRunning, nil)
+				continue
+			}
+			
+			if err != nil {
+				log.Errorf("Failed to restore bot %d: %v", bot.ID, err)
+				// Status is already stopped from above, so we're good
+			} else {
+				log.Infof("Successfully restored bot %d", bot.ID)
+			}
+		}
+		
+		log.Info("Finished restoring running bots")
+	}()
 
 	// Initialize handlers
 	authHandler := handler.NewAuthHandler(authService)
@@ -295,11 +343,13 @@ func main() {
 			bots.POST("/:id/start", botHandler.StartBot)
 			bots.POST("/:id/stop", botHandler.StopBot)
 			bots.GET("/:id/positions", botHandler.ListPositions)
+			bots.GET("/:id/orders", botHandler.ListOrders)
 		}
-
-		// WebSocket route
-		v1.GET("/ws", middleware.AuthMiddleware(authService), wsHub.ServeWS)
 	}
+
+	// WebSocket route (outside /api/v1 for simplicity)
+	// Use WebSocketAuth middleware to accept token as query parameter
+	router.GET("/ws", middleware.WebSocketAuth(authService), wsHub.ServeWS)
 
 	// Create HTTP server
 	srv := &http.Server{

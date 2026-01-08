@@ -166,3 +166,31 @@ func (r *PositionRepository) UpdatePriceTracking(ctx context.Context, posID int6
 	pos.LowestPrice = lowest
 	return r.Update(ctx, pos)
 }
+
+// Delete deletes a position
+func (r *PositionRepository) Delete(ctx context.Context, posID int64) error {
+	pos, err := r.GetByID(ctx, posID)
+	if err != nil {
+		return err
+	}
+
+	posIDStr := strconv.FormatInt(posID, 10)
+	botIDStr := strconv.FormatInt(pos.BotConfigID, 10)
+
+	// Remove position object
+	key := redis.PositionKey(posIDStr)
+	err = r.redis.Del(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	// Remove from bot's positions set
+	botPositionsKey := redis.BotPositionsKey(botIDStr)
+	r.redis.SRem(ctx, botPositionsKey, posIDStr)
+
+	// Remove from active positions set (if it was active)
+	activeKey := redis.ActivePositionsKey(botIDStr)
+	r.redis.SRem(ctx, activeKey, posIDStr)
+
+	return nil
+}

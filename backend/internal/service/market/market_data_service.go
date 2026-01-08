@@ -47,8 +47,8 @@ func NewMarketDataService(redisClient *redis.Client, wsClient *indodax.WSClient,
 
 // Start begins listening to market data
 func (s *MarketDataService) Start() {
-	// Register WS handlers
-	s.wsClient.SetMessageHandler(s.handleWSMessage)
+	// Register WS handlers (add, don't replace existing handlers)
+	s.wsClient.AddMessageHandler(s.handleWSMessage)
 
 	// Connect to WS
 	if err := s.wsClient.Connect(); err != nil {
@@ -65,9 +65,13 @@ func (s *MarketDataService) Start() {
 		go s.RefreshMetadata()
 	}
 
-	// Start REST poller for Best Bid / Best Ask and Gap Analysis
+	// Initial gap update (synchronous - must complete before server starts)
+	logger.Infof("Performing initial gap/spread update from REST API...")
+	s.updateGapsFromREST()
+	logger.Infof("Initial gap/spread update completed")
+
+	// Start periodic REST poller for Best Bid / Best Ask and Gap Analysis
 	// (WebSocket market:summary-24h doesn't provide Bid/Ask)
-	go s.updateGapsFromREST()
 	go s.pollGapData()
 }
 
@@ -179,7 +183,7 @@ func (s *MarketDataService) handleWSMessage(channel string, data []byte) {
 }
 
 func (s *MarketDataService) processSummaryUpdate(data []byte) {
-	logger.Infof("Received market summary update: %d bytes", len(data))
+	// Silent processing - no logging for market summary updates
 	var summaryData struct {
 		Data [][]interface{} `json:"data"`
 	}

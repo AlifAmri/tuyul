@@ -201,6 +201,11 @@ func (c *Client) Subscribe(ctx context.Context, channels ...string) *redis.PubSu
 	return c.client.Subscribe(ctx, channels...)
 }
 
+// PSubscribe subscribes to one or more patterns (supports wildcards)
+func (c *Client) PSubscribe(ctx context.Context, patterns ...string) *redis.PubSub {
+	return c.client.PSubscribe(ctx, patterns...)
+}
+
 // Keys returns all keys matching pattern
 func (c *Client) Keys(ctx context.Context, pattern string) ([]string, error) {
 	return c.client.Keys(ctx, pattern).Result()

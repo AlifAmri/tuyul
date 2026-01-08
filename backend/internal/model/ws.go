@@ -27,10 +27,12 @@ type WSAuthRequest struct {
 
 // WSBotUpdatePayload represents a bot status/PnL update
 type WSBotUpdatePayload struct {
-	BotID          int64   `json:"bot_id"`
-	Status         string  `json:"status"`
-	TotalTrades    int     `json:"total_trades"`
-	WinningTrades  int     `json:"winning_trades"`
-	TotalProfitIDR float64 `json:"total_profit_idr"`
-	EquityIDR      float64 `json:"equity_idr"`
+	BotID          int64              `json:"bot_id"`
+	Status         string             `json:"status"`
+	TotalTrades    int                `json:"total_trades"`
+	WinningTrades  int                `json:"winning_trades"`
+	WinRate        float64            `json:"win_rate"` // Win rate percentage
+	TotalProfitIDR float64            `json:"total_profit_idr"`
+	EquityIDR      float64            `json:"equity_idr"`
+	Balances       map[string]float64 `json:"balances,omitempty"` // Real-time balance updates
 }

@@ -42,6 +42,9 @@ type BotInstance struct {
 	CurrentBid   float64
 	CurrentAsk   float64
 	BaseCurrency string // e.g. "btc" in "btcidr"
+	LastBuyPrice float64 // Track last buy price for profit calculation
+	TotalCoinBought float64 // Track total coins bought (for average price calculation)
+	TotalCostIDR float64 // Track total cost in IDR (for average price calculation)
 }
 
 func NewMarketMakerService(
@@ -94,7 +97,13 @@ func (s *MarketMakerService) CreateBot(ctx context.Context, userID string, req *
 		apiKeyID = req.APIKeyID
 	}
 
-	// 3. Create bot config
+	// 3. Get pair info to determine base currency
+	pairInfo, ok := s.marketDataService.GetPairInfo(req.Pair)
+	if !ok {
+		return nil, util.ErrBadRequest("Invalid or unsupported pair")
+	}
+
+	// 4. Create bot config
 	bot := &model.BotConfig{
 		UserID:                     userID,
 		Name:                       req.Name,
@@ -112,16 +121,32 @@ func (s *MarketMakerService) CreateBot(ctx context.Context, userID string, req *
 		UpdatedAt:                  time.Now(),
 	}
 
-	// Initialize base currency balance to 0 so it shows up in UI
-	if pairInfo, ok := s.marketDataService.GetPairInfo(req.Pair); ok {
+	// 5. Initialize balances properly
+	bot.Balances = make(map[string]float64)
+	
+	if req.IsPaperTrading {
+		// Paper trading: set IDR balance and coin balance (coin = 0)
+		bot.Balances["idr"] = req.InitialBalanceIDR
 		bot.Balances[pairInfo.BaseCurrency] = 0
+		s.log.Infof("Bot created (paper): IDR=%.2f, %s=0", req.InitialBalanceIDR, pairInfo.BaseCurrency)
+	} else {
+		// Live trading: set IDR balance only, coin = 0
+		// Note: For live trading, actual balance will be synced from Indodax when bot starts
+		// But we initialize with the allocated amount for tracking
+		bot.Balances["idr"] = req.InitialBalanceIDR
+		bot.Balances[pairInfo.BaseCurrency] = 0
+		s.log.Infof("Bot created (live): IDR=%.2f (will sync from Indodax on start), %s=0", 
+			req.InitialBalanceIDR, pairInfo.BaseCurrency)
 	}
 
-	// 4. Save to repository
+	// 6. Save to repository
 	if err := s.botRepo.Create(ctx, bot); err != nil {
 		s.log.Errorf("Failed to create bot: %v", err)
 		return nil, util.ErrInternalServer("Failed to create bot")
 	}
+
+	s.log.Infof("Bot created successfully: ID=%d, Name=%s, Type=%s, Pair=%s, PaperTrading=%v", 
+		bot.ID, bot.Name, bot.Type, bot.Pair, bot.IsPaperTrading)
 
 	return bot, nil
 }
@@ -185,6 +210,19 @@ func (s *MarketMakerService) DeleteBot(ctx context.Context, userID string, botID
 		return util.ErrBadRequest("Cannot delete a running bot. Stop it first.")
 	}
 
+	// Delete all orders associated with this bot
+	orders, err := s.orderRepo.ListByParentAndUser(ctx, userID, "bot", botID)
+	if err != nil {
+		s.log.Warnf("Failed to list orders for bot %d: %v", botID, err)
+	} else {
+		s.log.Infof("Deleting %d orders for bot %d", len(orders), botID)
+		for _, order := range orders {
+			if err := s.orderRepo.Delete(ctx, order.ID); err != nil {
+				s.log.Warnf("Failed to delete order %d for bot %d: %v", order.ID, botID, err)
+			}
+		}
+	}
+
 	return s.botRepo.Delete(ctx, botID)
 }
 
@@ -232,22 +270,111 @@ func (s *MarketMakerService) StartBot(ctx context.Context, userID string, botID 
 	if !ok {
 		return util.ErrBadRequest("Invalid pair")
 	}
-	inst.BaseCurrency = pairInfo.BaseCurrency
+	
+	// Derive base currency from pair ID (more reliable than API field)
+	// For pairs like "cstidr", base currency is "cst" (everything before "idr")
+	if strings.HasSuffix(bot.Pair, "idr") {
+		inst.BaseCurrency = strings.TrimSuffix(bot.Pair, "idr")
+	} else if strings.Contains(bot.Pair, "_") {
+		// For pairs like "btc_usdt", take the first part
+		parts := strings.Split(bot.Pair, "_")
+		inst.BaseCurrency = parts[0]
+	} else {
+		// Fallback to API field if format is unknown
+		inst.BaseCurrency = pairInfo.BaseCurrency
+	}
+	
+	if inst.BaseCurrency == "idr" || inst.BaseCurrency == "" {
+		s.log.Errorf("Bot %d: Invalid BaseCurrency '%s' for pair %s (derived from pair ID)", botID, inst.BaseCurrency, bot.Pair)
+		return util.ErrBadRequest(fmt.Sprintf("Invalid base currency: %s", inst.BaseCurrency))
+	}
+	s.log.Debugf("Bot %d: BaseCurrency set to '%s' for pair %s (API had: %s)", botID, inst.BaseCurrency, bot.Pair, pairInfo.BaseCurrency)
+
+	// 3.5. Initialize balances if needed (for paper trading)
+	if bot.IsPaperTrading {
+		s.log.Infof("Bot %d: Initializing balances for paper trading (InitialBalanceIDR=%.2f)", botID, bot.InitialBalanceIDR)
+		
+		// Initialize balances map if nil
+		if bot.Balances == nil {
+			bot.Balances = make(map[string]float64)
+		}
+		
+		// Get current balances
+		currentIDR := bot.Balances["idr"]
+		currentCoin := bot.Balances[inst.BaseCurrency]
+		
+		s.log.Infof("Bot %d: Current balances before reset - IDR=%.2f, %s=%.8f", 
+			botID, currentIDR, inst.BaseCurrency, currentCoin)
+		
+		// For paper trading, always validate and reset if corrupted
+		// Reset if: negative, zero (when initial > 0), or unreasonably large
+		needsReset := false
+		if currentIDR < 0 {
+			s.log.Warnf("Bot %d: IDR balance is negative (%.2f), resetting", botID, currentIDR)
+			needsReset = true
+		} else if bot.InitialBalanceIDR > 0 && (currentIDR == 0 || currentIDR > bot.InitialBalanceIDR*10 || currentIDR > 1000000000) {
+			s.log.Warnf("Bot %d: IDR balance looks corrupted (%.2f), resetting to initial (%.2f)", 
+				botID, currentIDR, bot.InitialBalanceIDR)
+			needsReset = true
+		}
+		
+		if currentCoin < 0 || currentCoin > 1000000 {
+			s.log.Warnf("Bot %d: %s balance looks corrupted (%.8f), resetting to 0", 
+				botID, inst.BaseCurrency, currentCoin)
+			needsReset = true
+		}
+		
+		// Always ensure both keys exist and have valid values
+		if needsReset || bot.Balances["idr"] == 0 {
+			bot.Balances["idr"] = bot.InitialBalanceIDR
+			bot.Balances[inst.BaseCurrency] = 0
+			s.log.Warnf("Bot %d: RESET balances to initial - IDR=%.2f, %s=0", 
+				botID, bot.InitialBalanceIDR, inst.BaseCurrency)
+		} else {
+			// Just ensure coin balance exists
+			if _, exists := bot.Balances[inst.BaseCurrency]; !exists {
+				bot.Balances[inst.BaseCurrency] = 0
+			}
+		}
+		
+		s.log.Infof("Bot %d: Final balances after initialization - IDR=%.2f, %s=%.8f", 
+			botID, bot.Balances["idr"], inst.BaseCurrency, bot.Balances[inst.BaseCurrency])
+		
+		// Save corrected balances to Redis
+		if err := s.botRepo.UpdateBalance(ctx, botID, bot.Balances); err != nil {
+			s.log.Errorf("Bot %d: Failed to save corrected balances to Redis: %v", botID, err)
+		} else {
+			s.log.Infof("Bot %d: Successfully saved corrected balances to Redis", botID)
+		}
+	}
 
 	s.instances[botID] = inst
 
+	// 3.6. Cancel any existing active orders for this bot (safety measure)
+	if bot.IsPaperTrading {
+		// For paper trading, we can't cancel via API, but we can clear the active order reference
+		// This prevents old corrupted orders from affecting the bot
+		inst.ActiveOrder = nil
+		s.log.Infof("Bot %d: Cleared any existing active order references", botID)
+	}
+
 	// 4. Subscribe to ticker
+	s.log.Infof("Bot %d: Subscribing to ticker for pair %s", botID, bot.Pair)
 	err = s.subManager.Subscribe(bot.Pair, func(ticker market.OrderBookTicker) {
+		s.log.Debugf("Bot %d: Received ticker update via subscription - bid=%.2f ask=%.2f", botID, ticker.BestBid, ticker.BestAsk)
 		select {
 		case inst.TickerChan <- ticker:
 		default:
 			// Full channel, skip ticker
+			s.log.Warnf("Bot %d: Ticker channel full, skipping update", botID)
 		}
 	})
 	if err != nil {
+		s.log.Errorf("Bot %d: Failed to subscribe to ticker: %v", botID, err)
 		delete(s.instances, botID)
 		return util.ErrInternalServer(fmt.Sprintf("Failed to subscribe to ticker: %v", err))
 	}
+	s.log.Infof("Bot %d: Successfully subscribed to ticker for pair %s", botID, bot.Pair)
 
 	// 5. Initial balance sync for live bots
 	if !bot.IsPaperTrading {
@@ -262,6 +389,8 @@ func (s *MarketMakerService) StartBot(ctx context.Context, userID string, botID 
 		delete(s.instances, botID)
 		return err
 	}
+	// Update in-memory status to match database
+	inst.Config.Status = model.BotStatusRunning
 
 	// 4. Start event loop
 	go s.runBot(inst)
@@ -270,8 +399,13 @@ func (s *MarketMakerService) StartBot(ctx context.Context, userID string, botID 
 
 	// Notify via WebSocket
 	s.notificationService.NotifyBotUpdate(ctx, userID, model.WSBotUpdatePayload{
-		BotID:  botID,
-		Status: model.BotStatusRunning,
+		BotID:          botID,
+		Status:         model.BotStatusRunning,
+		TotalTrades:    bot.TotalTrades,
+		WinningTrades:  bot.WinningTrades,
+		WinRate:        bot.WinRate(),
+		TotalProfitIDR: bot.TotalProfitIDR,
+		Balances:       bot.Balances,
 	})
 
 	return nil
@@ -299,19 +433,59 @@ func (s *MarketMakerService) StopBot(ctx context.Context, userID string, botID i
 	delete(s.instances, botID)
 	s.mu.Unlock()
 
-	// 1. Signal stop
+	// 1. Cancel any active/open orders
+	if inst.ActiveOrder != nil && inst.ActiveOrder.Status == "open" {
+		s.log.Infof("Bot %d: Cancelling active order %s (ID: %s)", botID, inst.ActiveOrder.Side, inst.ActiveOrder.OrderID)
+		if err := inst.TradeClient.CancelOrder(ctx, inst.Config.Pair, inst.ActiveOrder.OrderID, inst.ActiveOrder.Side); err != nil {
+			s.log.Warnf("Bot %d: Failed to cancel active order %s: %v", botID, inst.ActiveOrder.OrderID, err)
+		} else {
+			s.orderRepo.UpdateStatus(ctx, inst.ActiveOrder.ID, "cancelled")
+			inst.ActiveOrder.Status = "cancelled"
+			s.notificationService.NotifyOrderUpdate(ctx, userID, inst.ActiveOrder)
+		}
+		inst.ActiveOrder = nil
+	}
+
+	// Also check for any other open orders for this bot
+	openOrders, err := s.orderRepo.ListByParentAndUser(ctx, userID, "bot", botID)
+	if err == nil {
+		for _, order := range openOrders {
+			if order.Status == "open" {
+				s.log.Infof("Bot %d: Cancelling open order %d (ID: %s)", botID, order.ID, order.OrderID)
+				if err := inst.TradeClient.CancelOrder(ctx, order.Pair, order.OrderID, order.Side); err != nil {
+					s.log.Warnf("Bot %d: Failed to cancel order %d: %v", botID, order.ID, err)
+				} else {
+					s.orderRepo.UpdateStatus(ctx, order.ID, "cancelled")
+					order.Status = "cancelled"
+					s.notificationService.NotifyOrderUpdate(ctx, userID, order)
+				}
+			}
+		}
+	}
+
+	// 2. Signal stop
 	close(inst.StopChan)
 
-	// 2. Unsubscribe (needs exact handler, for now we will fix later)
+	// 3. Unsubscribe (needs exact handler, for now we will fix later)
 	// s.subManager.Unsubscribe(bot.Pair, handler)
 
-	// 3. Update status in DB
+	// 4. Update status in DB
 	err = s.botRepo.UpdateStatus(ctx, botID, model.BotStatusStopped, nil)
+	// Update in-memory status to match database
+	if inst != nil {
+		inst.Config.Status = model.BotStatusStopped
+	}
 
 	// Notify via WebSocket
+	stoppedBot, _ := s.botRepo.GetByID(ctx, botID)
 	s.notificationService.NotifyBotUpdate(ctx, userID, model.WSBotUpdatePayload{
-		BotID:  botID,
-		Status: model.BotStatusStopped,
+		BotID:          botID,
+		Status:         model.BotStatusStopped,
+		TotalTrades:    stoppedBot.TotalTrades,
+		WinningTrades:  stoppedBot.WinningTrades,
+		WinRate:        stoppedBot.WinRate(),
+		TotalProfitIDR: stoppedBot.TotalProfitIDR,
+		Balances:       stoppedBot.Balances,
 	})
 
 	return err
@@ -332,20 +506,54 @@ func (s *MarketMakerService) runBot(inst *BotInstance) {
 }
 
 func (s *MarketMakerService) handleTicker(inst *BotInstance, ticker market.OrderBookTicker) {
-	// 1. Check volatility
-	coin, err := s.marketDataService.GetCoin(context.Background(), inst.Config.Pair)
-	if err == nil && coin.Volatility1m > 2.0 {
-		return // Too volatile, pause
-	}
+	s.log.Debugf("Bot %d received ticker: bid=%.2f ask=%.2f", inst.Config.ID, ticker.BestBid, ticker.BestAsk)
 
-	// 2. Update prices
+	// 2. Update prices first (needed for decision making)
 	inst.CurrentBid = ticker.BestBid
 	inst.CurrentAsk = ticker.BestAsk
 
 	// 3. Check minimum gap
 	spreadPercent := (ticker.BestAsk - ticker.BestBid) / ticker.BestBid * 100
 	if spreadPercent < inst.Config.MinGapPercent {
+		s.log.Debugf("Bot %d: Spread too tight (%.4f%% < %.4f%%), skipping", inst.Config.ID, spreadPercent, inst.Config.MinGapPercent)
 		return // Spread too tight
+	}
+
+	s.log.Debugf("Bot %d: Gap OK (%.4f%% >= %.4f%%), processing orders", inst.Config.ID, spreadPercent, inst.Config.MinGapPercent)
+
+	// 1. Check volatility - only skip SELL if volatile AND we're at a loss
+	coin, err := s.marketDataService.GetCoin(context.Background(), inst.Config.Pair)
+	if err == nil && coin.Volatility1m > 2.0 {
+		// Determine if we would be selling
+		coinBalance := inst.Config.Balances[inst.BaseCurrency]
+		if coinBalance > 0 {
+			// We have coins, so we would be selling
+			// Check if we're at profit or loss
+			if inst.LastBuyPrice > 0 {
+				// Compare current ask price (what we'd sell at) vs buy price
+				currentSellPrice := ticker.BestAsk
+				profitPercent := ((currentSellPrice - inst.LastBuyPrice) / inst.LastBuyPrice) * 100
+				
+				if profitPercent < 0 {
+					// We're at a loss - skip selling during high volatility
+					s.log.Debugf("Bot %d: Too volatile (%.2f%%) and at loss (%.2f%%), skipping SELL", 
+						inst.Config.ID, coin.Volatility1m, profitPercent)
+					return
+				} else {
+					// We're at profit - volatility is fine, proceed with selling
+					s.log.Debugf("Bot %d: Volatile (%.2f%%) but at profit (%.2f%%), proceeding with SELL", 
+						inst.Config.ID, coin.Volatility1m, profitPercent)
+				}
+			} else {
+				// No buy price tracked yet - skip selling during high volatility to be safe
+				s.log.Debugf("Bot %d: Too volatile (%.2f%%) for SELL (no buy price tracked), skipping", 
+					inst.Config.ID, coin.Volatility1m)
+				return
+			}
+		} else {
+			// We would be buying - volatility is OK, proceed
+			s.log.Debugf("Bot %d: Volatile (%.2f%%) but buying is OK, proceeding", inst.Config.ID, coin.Volatility1m)
+		}
 	}
 
 	// 4. Process orders
@@ -357,38 +565,146 @@ func (s *MarketMakerService) handleTicker(inst *BotInstance, ticker market.Order
 }
 
 func (s *MarketMakerService) placeNewOrder(inst *BotInstance) {
+	s.log.Debugf("Bot %d: placeNewOrder called", inst.Config.ID)
+
+	// Ensure balances map is initialized
+	if inst.Config.Balances == nil {
+		inst.Config.Balances = make(map[string]float64)
+		inst.Config.Balances["idr"] = inst.Config.InitialBalanceIDR
+		inst.Config.Balances[inst.BaseCurrency] = 0
+		s.log.Warnf("Bot %d: Balances map was nil, reinitialized", inst.Config.ID)
+	}
+
 	// Determine side based on inventory
 	idrBalance := inst.Config.Balances["idr"]
-	coinBalance := inst.Config.Balances[inst.BaseCurrency]
+	if idrBalance < 0 {
+		idrBalance = 0
+		inst.Config.Balances["idr"] = 0
+		s.log.Warnf("Bot %d: IDR balance was negative, reset to 0", inst.Config.ID)
+	}
+
+	coinBalance, exists := inst.Config.Balances[inst.BaseCurrency]
+	if !exists {
+		coinBalance = 0
+		inst.Config.Balances[inst.BaseCurrency] = 0
+	}
+	if coinBalance < 0 {
+		coinBalance = 0
+		inst.Config.Balances[inst.BaseCurrency] = 0
+		s.log.Warnf("Bot %d: %s balance was negative, reset to 0", inst.Config.ID, inst.BaseCurrency)
+	}
+
+	s.log.Debugf("Bot %d: Balance check - IDR=%.2f, %s=%.8f (BaseCurrency=%s, all balances: %+v)", 
+		inst.Config.ID, idrBalance, inst.BaseCurrency, coinBalance, inst.BaseCurrency, inst.Config.Balances)
 
 	pairInfo, ok := s.marketDataService.GetPairInfo(inst.Config.Pair)
 	if !ok {
+		s.log.Warnf("Bot %d: Pair info not found for %s", inst.Config.ID, inst.Config.Pair)
 		return
 	}
+	
+	// Use VolumePrecision if valid, otherwise fallback to PriceRound, then default to 8
+	volumePrecision := pairInfo.VolumePrecision
+	if volumePrecision <= 0 {
+		if pairInfo.PriceRound > 0 {
+			volumePrecision = pairInfo.PriceRound
+			s.log.Debugf("Bot %d: VolumePrecision is 0, using PriceRound=%d from API", inst.Config.ID, volumePrecision)
+		} else {
+			volumePrecision = 8 // Final fallback to 8 decimal places for crypto
+			s.log.Debugf("Bot %d: VolumePrecision and PriceRound are both 0, using default 8", inst.Config.ID)
+		}
+	}
+	
+	s.log.Debugf("Bot %d: Pair info - VolumePrecision=%d, TradeMinBaseCurrency=%d, TradeMinTradedCurrency=%.2f", 
+		inst.Config.ID, pairInfo.VolumePrecision, pairInfo.TradeMinBaseCurrency, pairInfo.TradeMinTradedCurrency)
 
 	var side string
 	var price, amount float64
 
-	if coinBalance >= float64(pairInfo.TradeMinBaseCurrency) {
-		// Have coins -> SELL ALL
+	// Safety check: ensure coinBalance is reasonable (not corrupted)
+	if coinBalance > 1000000 { // More than 1 million coins is definitely wrong
+		s.log.Errorf("Bot %d: Coin balance is unreasonably large (%.8f), resetting to 0", inst.Config.ID, coinBalance)
+		coinBalance = 0
+		inst.Config.Balances[inst.BaseCurrency] = 0
+	}
+	
+	// Decision logic:
+	// - If we have coins: SELL ALL available coin balance (with stop-loss check)
+	// - If we have IDR: BUY using OrderSizeIDR / price
+	if coinBalance > 0 {
+		// Have coins -> SELL ALL available balance
+		// Calculate sell price first
+		sellPrice := inst.CurrentAsk - s.getTickSize(pairInfo) // Competitive sell
+		
+		// Check stop-loss before selling (prevent selling at large loss when price keeps dropping)
+		if inst.LastBuyPrice > 0 {
+			// Calculate current profit/loss percentage
+			profitPercent := ((sellPrice - inst.LastBuyPrice) / inst.LastBuyPrice) * 100
+			
+			// If loss exceeds 5%, skip selling to avoid realizing large losses
+			// This prevents selling at a large loss when price keeps dropping
+			// The bot will wait for price recovery or hit the total MaxLossIDR limit
+			if profitPercent < -5.0 {
+				s.log.Debugf("Bot %d: Skipping SELL - at loss (%.2f%%) and price may recover, holding", 
+					inst.Config.ID, profitPercent)
+				return
+			}
+			
+			s.log.Debugf("Bot %d: SELL check - buyPrice=%.2f, sellPrice=%.2f, profit=%.2f%%", 
+				inst.Config.ID, inst.LastBuyPrice, sellPrice, profitPercent)
+		}
+		
 		side = "sell"
-		price = inst.CurrentAsk - s.getTickSize(pairInfo) // Competitive sell
-		amount = coinBalance
+		price = sellPrice
+		amount = coinBalance // Sell all available coins
+		
+		// Safety check: don't sell if amount is unreasonably large (corruption protection)
+		if amount > 1000000 {
+			s.log.Errorf("Bot %d: Refusing to place SELL order - amount %.8f is unreasonably large", inst.Config.ID, amount)
+			return
+		}
+		
+		s.log.Debugf("Bot %d: Placing SELL order - price=%.2f amount=%.8f (all available)", inst.Config.ID, price, amount)
 	} else if idrBalance >= inst.Config.OrderSizeIDR {
 		// Have IDR -> BUY
 		side = "buy"
 		price = inst.CurrentBid + s.getTickSize(pairInfo) // Competitive buy
 		amount = inst.Config.OrderSizeIDR / price
+		
+		// Safety check: don't buy more than we can afford
+		maxAffordable := idrBalance / price
+		if amount > maxAffordable {
+			s.log.Warnf("Bot %d: Attempted to buy %.8f but can only afford %.8f, capping", inst.Config.ID, amount, maxAffordable)
+			amount = maxAffordable
+		}
+		
+		s.log.Debugf("Bot %d: Placing BUY order - price=%.2f amount=%.8f (size=%.2f IDR)", inst.Config.ID, price, amount, inst.Config.OrderSizeIDR)
 	} else {
 		// Insufficient balance
+		s.log.Debugf("Bot %d: Insufficient balance - IDR=%.2f < %.2f, %s=%.8f", 
+			inst.Config.ID, idrBalance, inst.Config.OrderSizeIDR, inst.BaseCurrency, coinBalance)
 		return
 	}
 
 	// Round amount and validate
-	amount = util.FloorToPrecision(amount, pairInfo.VolumePrecision)
-	if amount < float64(pairInfo.TradeMinBaseCurrency) || amount*price < pairInfo.TradeMinTradedCurrency {
+	
+	s.log.Debugf("Bot %d: Before rounding - amount=%.8f, volumePrecision=%d", inst.Config.ID, amount, volumePrecision)
+	amount = util.FloorToPrecision(amount, volumePrecision)
+	s.log.Debugf("Bot %d: After rounding - amount=%.8f", inst.Config.ID, amount)
+	
+	// Validate minimum order value (in IDR)
+	// Since we trade based on IDR order size, we only need to check TradeMinTradedCurrency
+	orderValueIDR := amount * price
+	if orderValueIDR < pairInfo.TradeMinTradedCurrency {
+		s.log.Debugf("Bot %d: Amount validation failed - order value=%.2f IDR < min traded currency=%.2f IDR (amount=%.8f * price=%.2f)", 
+			inst.Config.ID, orderValueIDR, pairInfo.TradeMinTradedCurrency, amount, price)
 		return
 	}
+	
+	s.log.Debugf("Bot %d: Order validation passed - amount=%.8f, price=%.2f, value=%.2f IDR (min=%.2f IDR)", 
+		inst.Config.ID, amount, price, orderValueIDR, pairInfo.TradeMinTradedCurrency)
+
+	s.log.Infof("Bot %d: Placing %s order - pair=%s price=%.2f amount=%.8f", inst.Config.ID, side, inst.Config.Pair, price, amount)
 
 	// Place order
 	ctx := context.Background()
@@ -397,6 +713,8 @@ func (s *MarketMakerService) placeNewOrder(inst *BotInstance) {
 		s.log.Errorf("Failed to place %s order for bot %d: %v", side, inst.Config.ID, err)
 		return
 	}
+
+	s.log.Infof("Bot %d: Successfully placed %s order - OrderID=%d", inst.Config.ID, side, res.OrderID)
 
 	// Create order model
 	order := &model.Order{
@@ -419,6 +737,20 @@ func (s *MarketMakerService) placeNewOrder(inst *BotInstance) {
 
 	inst.ActiveOrder = order
 	s.log.Infof("Bot %d placed %s order: %.8f @ %.2f", inst.Config.ID, side, amount, price)
+	
+	// Notify order creation via WebSocket
+	s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, order)
+	
+	// Also notify bot update with current stats and balances
+	s.notificationService.NotifyBotUpdate(ctx, inst.Config.UserID, model.WSBotUpdatePayload{
+		BotID:          inst.Config.ID,
+		Status:         inst.Config.Status,
+		TotalTrades:    inst.Config.TotalTrades,
+		WinningTrades:  inst.Config.WinningTrades,
+		WinRate:        inst.Config.WinRate(),
+		TotalProfitIDR: inst.Config.TotalProfitIDR,
+		Balances:       inst.Config.Balances,
+	})
 }
 
 func (s *MarketMakerService) checkReposition(inst *BotInstance) {
@@ -441,6 +773,11 @@ func (s *MarketMakerService) checkReposition(inst *BotInstance) {
 		}
 
 		s.orderRepo.UpdateStatus(ctx, order.ID, "cancelled")
+		order.Status = "cancelled"
+		
+		// Notify order cancellation via WebSocket
+		s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, order)
+		
 		inst.ActiveOrder = nil
 	}
 }
@@ -448,25 +785,130 @@ func (s *MarketMakerService) checkReposition(inst *BotInstance) {
 func (s *MarketMakerService) handleFilled(inst *BotInstance, filledOrder *model.Order) {
 	ctx := context.Background()
 
+	// If the order doesn't have a database ID, look it up by OrderID (for paper trading)
+	if filledOrder.ID == 0 && filledOrder.OrderID != "" {
+		dbOrder, err := s.orderRepo.GetByOrderID(ctx, filledOrder.OrderID)
+		if err != nil {
+			s.log.Errorf("Bot %d: Failed to find order by OrderID %s: %v", inst.Config.ID, filledOrder.OrderID, err)
+			return
+		}
+		// Update filledOrder with database order details
+		filledOrder.ID = dbOrder.ID
+		filledOrder.Pair = dbOrder.Pair
+		filledOrder.Side = dbOrder.Side
+		filledOrder.Price = dbOrder.Price
+		filledOrder.Amount = dbOrder.Amount
+		s.log.Debugf("Bot %d: Found order in database - ID=%d, OrderID=%s", inst.Config.ID, filledOrder.ID, filledOrder.OrderID)
+	}
+
+	// Ensure balances map is initialized
+	if inst.Config.Balances == nil {
+		inst.Config.Balances = make(map[string]float64)
+		inst.Config.Balances["idr"] = inst.Config.InitialBalanceIDR
+		inst.Config.Balances[inst.BaseCurrency] = 0
+	}
+
+	// Use FilledAmount if available, otherwise use Amount
+	filledAmount := filledOrder.FilledAmount
+	if filledAmount == 0 {
+		filledAmount = filledOrder.Amount
+	}
+
+	// Safety check: reject unreasonably large amounts (likely corrupted orders)
+	if filledAmount > 1000000 {
+		s.log.Errorf("Bot %d: Rejecting order fill - amount %.8f is unreasonably large (order likely corrupted)", 
+			inst.Config.ID, filledAmount)
+		return
+	}
+	
+	// Safety check: reject unreasonably large prices
+	if filledOrder.Price > 1000000000 {
+		s.log.Errorf("Bot %d: Rejecting order fill - price %.2f is unreasonably large (order likely corrupted)", 
+			inst.Config.ID, filledOrder.Price)
+		return
+	}
+
+	// Calculate total cost/value
+	totalValue := filledAmount * filledOrder.Price
+	
+	// Safety check: reject unreasonably large total values
+	if totalValue > 10000000000 { // More than 10 billion IDR
+		s.log.Errorf("Bot %d: Rejecting order fill - total value %.2f is unreasonably large (order likely corrupted)", 
+			inst.Config.ID, totalValue)
+		return
+	}
+
+	s.log.Debugf("Bot %d: handleFilled - side=%s filledAmount=%.8f price=%.2f totalValue=%.2f, before: IDR=%.2f %s=%.8f", 
+		inst.Config.ID, filledOrder.Side, filledAmount, filledOrder.Price, totalValue,
+		inst.Config.Balances["idr"], inst.BaseCurrency, inst.Config.Balances[inst.BaseCurrency])
+
 	// 1. Update balance
 	if filledOrder.Side == "buy" {
-		inst.Config.Balances["idr"] -= filledOrder.Amount * filledOrder.Price
-		inst.Config.Balances[inst.BaseCurrency] += filledOrder.Amount
+		// Buy: spend IDR, receive coins
+		inst.Config.Balances["idr"] -= totalValue
+		if inst.Config.Balances["idr"] < 0 {
+			s.log.Warnf("Bot %d: IDR balance went negative (%.2f), resetting to 0", inst.Config.ID, inst.Config.Balances["idr"])
+			inst.Config.Balances["idr"] = 0
+		}
+		inst.Config.Balances[inst.BaseCurrency] += filledAmount
+		// Track buy price and cost for profit calculation (weighted average)
+		inst.TotalCoinBought += filledAmount
+		inst.TotalCostIDR += totalValue
+		inst.LastBuyPrice = inst.TotalCostIDR / inst.TotalCoinBought // Average buy price
+		s.log.Debugf("Bot %d: After BUY - IDR=%.2f %s=%.8f (avg buy price: %.2f, total coins: %.8f, total cost: %.2f)", 
+			inst.Config.ID, inst.Config.Balances["idr"], inst.BaseCurrency, inst.Config.Balances[inst.BaseCurrency], 
+			inst.LastBuyPrice, inst.TotalCoinBought, inst.TotalCostIDR)
 	} else {
-		inst.Config.Balances[inst.BaseCurrency] -= filledOrder.Amount
-		inst.Config.Balances["idr"] += filledOrder.Amount * filledOrder.Price
+		// Sell: spend coins, receive IDR
+		if inst.Config.Balances[inst.BaseCurrency] < filledAmount {
+			s.log.Warnf("Bot %d: Attempted to sell %.8f %s but only have %.8f, capping to available", 
+				inst.Config.ID, filledAmount, inst.BaseCurrency, inst.Config.Balances[inst.BaseCurrency])
+			filledAmount = inst.Config.Balances[inst.BaseCurrency]
+			totalValue = filledAmount * filledOrder.Price
+		}
+		inst.Config.Balances[inst.BaseCurrency] -= filledAmount
+		if inst.Config.Balances[inst.BaseCurrency] < 0 {
+			inst.Config.Balances[inst.BaseCurrency] = 0
+		}
+		inst.Config.Balances["idr"] += totalValue
+		
+		// Update tracking: reduce coins and cost proportionally
+		if inst.TotalCoinBought > 0 {
+			// Calculate proportion of coins being sold
+			sellRatio := filledAmount / inst.TotalCoinBought
+			if sellRatio > 1.0 {
+				sellRatio = 1.0 // Cap at 100% if somehow we're selling more than we bought
+			}
+			// Reduce total cost proportionally
+			costOfSoldCoins := inst.TotalCostIDR * sellRatio
+			inst.TotalCostIDR -= costOfSoldCoins
+			inst.TotalCoinBought -= filledAmount
+			if inst.TotalCoinBought < 0 {
+				inst.TotalCoinBought = 0
+			}
+			// Recalculate average buy price for remaining coins
+			if inst.TotalCoinBought > 0 {
+				inst.LastBuyPrice = inst.TotalCostIDR / inst.TotalCoinBought
+			} else {
+				inst.LastBuyPrice = 0
+				inst.TotalCostIDR = 0
+			}
+		}
+		
+		s.log.Debugf("Bot %d: After SELL - IDR=%.2f %s=%.8f (added %.2f IDR, remaining coins: %.8f, remaining cost: %.2f)", 
+			inst.Config.ID, inst.Config.Balances["idr"], inst.BaseCurrency, inst.Config.Balances[inst.BaseCurrency],
+			totalValue, inst.TotalCoinBought, inst.TotalCostIDR)
 
-		// 2. Update stats and profit
+		// 2. Calculate and update profit
 		inst.Config.TotalTrades++
-		// Simplified profit calculation for now (assumes last buy price was lower)
-		// For market maker, profit is ideally (SellPrice - BuyPrice) * Amount
-		// Since we handle both sequentially, we can calculate based on the spread captured
-		// For now just track it roughly
-		profit := s.calculateProfit(filledOrder)
+		profit := s.calculateProfit(inst, filledOrder, filledAmount)
 		inst.Config.TotalProfitIDR += profit
 		if profit > 0 {
 			inst.Config.WinningTrades++
 		}
+		
+		s.log.Infof("Bot %d: SELL profit calculated - sellPrice=%.2f, avgBuyPrice=%.2f, amount=%.8f, profit=%.2f IDR, totalProfit=%.2f IDR", 
+			inst.Config.ID, filledOrder.Price, inst.LastBuyPrice, filledAmount, profit, inst.Config.TotalProfitIDR)
 
 		// 3. Circuit breaker check
 		if inst.Config.TotalProfitIDR < -inst.Config.MaxLossIDR {
@@ -480,18 +922,53 @@ func (s *MarketMakerService) handleFilled(inst *BotInstance, filledOrder *model.
 	s.botRepo.UpdateBalance(ctx, inst.Config.ID, inst.Config.Balances)
 	s.botRepo.UpdateStats(ctx, inst.Config.ID, inst.Config.TotalTrades, inst.Config.WinningTrades, inst.Config.TotalProfitIDR)
 
-	s.orderRepo.UpdateStatus(ctx, filledOrder.ID, "filled")
+	// Update order status and filled amount in database
+	if filledOrder.ID > 0 {
+		// Get the order from database to update it
+		dbOrder, err := s.orderRepo.GetByID(ctx, filledOrder.ID)
+		if err != nil {
+			s.log.Errorf("Bot %d: Failed to get order %d for update: %v", inst.Config.ID, filledOrder.ID, err)
+		} else {
+			// Update filled amount and status
+			dbOrder.FilledAmount = filledAmount
+			dbOrder.Status = "filled"
+			now := time.Now()
+			dbOrder.FilledAt = &now
+			
+			// Save updated order
+			if err := s.orderRepo.Update(ctx, dbOrder, "open"); err != nil {
+				s.log.Errorf("Bot %d: Failed to update order %d: %v", inst.Config.ID, filledOrder.ID, err)
+			} else {
+				s.log.Debugf("Bot %d: Order filled - ID=%d, filledAmount=%.8f (original=%.8f)", 
+					inst.Config.ID, filledOrder.ID, filledAmount, filledOrder.Amount)
+				// Update filledOrder reference for WebSocket notification
+				filledOrder.FilledAmount = filledAmount
+				filledOrder.Status = "filled"
+				filledOrder.FilledAt = &now
+			}
+		}
+	} else {
+		s.log.Warnf("Bot %d: Cannot update order status - order has no database ID (OrderID=%s)", 
+			inst.Config.ID, filledOrder.OrderID)
+		filledOrder.Status = "filled"
+		filledOrder.FilledAmount = filledAmount
+	}
 	inst.ActiveOrder = nil
 
-	s.log.Infof("Bot %d order filled: %s %.8f @ %.2f", inst.Config.ID, filledOrder.Side, filledOrder.Amount, filledOrder.Price)
+	s.log.Infof("Bot %d order filled: %s %.8f @ %.2f", inst.Config.ID, filledOrder.Side, filledAmount, filledOrder.Price)
 
-	// Notify via WebSocket
+	// Notify order update via WebSocket
+	s.notificationService.NotifyOrderUpdate(ctx, inst.Config.UserID, filledOrder)
+
+	// Notify bot update with current stats and balances
 	s.notificationService.NotifyBotUpdate(ctx, inst.Config.UserID, model.WSBotUpdatePayload{
 		BotID:          inst.Config.ID,
 		Status:         inst.Config.Status,
 		TotalTrades:    inst.Config.TotalTrades,
 		WinningTrades:  inst.Config.WinningTrades,
+		WinRate:        inst.Config.WinRate(),
 		TotalProfitIDR: inst.Config.TotalProfitIDR,
+		Balances:       inst.Config.Balances,
 	})
 }
 
@@ -565,12 +1042,30 @@ func (s *MarketMakerService) syncBalance(ctx context.Context, inst *BotInstance)
 	return s.botRepo.UpdateBalance(ctx, inst.Config.ID, inst.Config.Balances)
 }
 
-func (s *MarketMakerService) calculateProfit(order *model.Order) float64 {
-	// Crude profit calculation: assuming 0.1% fee on each side (total 0.2%)
-	// And assuming we captured the spread.
-	// Actually we should track the 'cost basis' for a true calculation.
-	// For now, let's just return a placeholder or simple logic
-	return 0.0 // Placeholder
+func (s *MarketMakerService) calculateProfit(inst *BotInstance, sellOrder *model.Order, sellAmount float64) float64 {
+	// Calculate profit: (SellPrice - BuyPrice) * Amount - Fees
+	// Fees: 0.1% on buy + 0.1% on sell = 0.2% total
+	const feePercent = 0.002 // 0.2% total fees
+	
+	if inst.LastBuyPrice == 0 {
+		// No buy price tracked, can't calculate profit accurately
+		// This shouldn't happen in normal flow, but handle gracefully
+		s.log.Warnf("Bot %d: Cannot calculate profit - no buy price tracked", inst.Config.ID)
+		return 0.0
+	}
+	
+	// Gross profit before fees
+	grossProfit := (sellOrder.Price - inst.LastBuyPrice) * sellAmount
+	
+	// Calculate fees
+	buyCost := inst.LastBuyPrice * sellAmount
+	sellRevenue := sellOrder.Price * sellAmount
+	fees := (buyCost + sellRevenue) * feePercent
+	
+	// Net profit
+	netProfit := grossProfit - fees
+	
+	return netProfit
 }
 
 func (s *MarketMakerService) validateBotConfig(ctx context.Context, req *model.BotConfigRequest) error {

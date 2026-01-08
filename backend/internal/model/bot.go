@@ -64,7 +64,7 @@ type BotConfig struct {
 type BotConfigRequest struct {
 	Name           string `json:"name" binding:"required"`
 	Type           string `json:"type" binding:"required,oneof=market_maker pump_hunter"`
-	Pair           string `json:"pair" binding:"required"`
+	Pair           string `json:"pair" binding:"required_if=Type market_maker"` // Only required for market_maker
 	IsPaperTrading bool   `json:"is_paper_trading"`
 	APIKeyID       *int64 `json:"api_key_id"`
 

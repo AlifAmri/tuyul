@@ -97,5 +97,45 @@ func OptionalAuth(authService *service.AuthService) gin.HandlerFunc {
 	}
 }
 
+// WebSocketAuth middleware for WebSocket connections
+// WebSocket clients can't set custom headers, so we accept token as query parameter
+func WebSocketAuth(authService *service.AuthService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// First try Authorization header (for standard HTTP upgrade)
+		authHeader := c.GetHeader("Authorization")
+		var token string
 
+		if authHeader != "" {
+			// Check if Bearer token
+			parts := strings.Split(authHeader, " ")
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				token = parts[1]
+			}
+		}
 
+		// If no header token, try query parameter
+		if token == "" {
+			token = c.Query("token")
+		}
+
+		if token == "" {
+			util.AbortWithCustomError(c, 401, util.ErrCodeUnauthorized, "Missing authentication token")
+			return
+		}
+
+		// Validate token
+		user, err := authService.ValidateToken(c.Request.Context(), token)
+		if err != nil {
+			util.AbortWithError(c, err)
+			return
+		}
+
+		// Set user in context
+		c.Set("user_id", user.ID)
+		c.Set("username", user.Username)
+		c.Set("user_role", user.Role)
+		c.Set("user", user)
+
+		c.Next()
+	}
+}

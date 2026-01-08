@@ -115,6 +115,16 @@ func OrderIDMapKey(indodaxOrderID string) string {
 	return fmtKey("order_id_map:%s", indodaxOrderID)
 }
 
+// BotOrdersKey returns a sorted set key for orders by bot (sorted by CreatedAt)
+func BotOrdersKey(botID int64) string {
+	return fmtKey("bot_orders:%d", botID)
+}
+
+// PositionOrdersKey returns a sorted set key for orders by position (sorted by CreatedAt)
+func PositionOrdersKey(positionID int64) string {
+	return fmtKey("position_orders:%d", positionID)
+}
+
 // Balance keys
 func BalanceKey(userID, currency string) string {
 	return fmtKey("balance:%s:%s", userID, currency)
