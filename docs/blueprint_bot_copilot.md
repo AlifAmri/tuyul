@@ -4,9 +4,9 @@
 
 The Copilot Bot is an **automated trading assistant** that executes individual trades with pre-configured profit targets and stop-loss protection. Unlike the Market Maker and Pump Hunter bots that run continuously, Copilot executes **one-time trades** with automatic sell order placement when the buy order fills.
 
-**Strategy Type**: Profit-target trading / Semi-automated trading  
-**Risk Level**: Moderate (configurable via stop-loss)  
-**Suitable For**: Manual traders who want automation for sell orders  
+**Strategy Type**: Profit-target trading / Semi-automated trading
+**Risk Level**: Moderate (configurable via stop-loss)
+**Suitable For**: Manual traders who want automation for sell orders
 **Timeframe**: Minutes to hours (depends on market conditions)
 
 ---
@@ -33,7 +33,8 @@ The Copilot Bot is an **automated trading assistant** that executes individual t
   "buying_price": 650000000,
   "volume_idr": 1000000,
   "target_profit": 5.0,
-  "stop_loss": 3.0
+  "stop_loss": 3.0,
+  "is_paper_trade": false
 }
 ```
 
@@ -43,6 +44,9 @@ The Copilot Bot is an **automated trading assistant** that executes individual t
 - `volume_idr`: Amount in IDR to spend on buy order
 - `target_profit`: Percentage profit target (%)
 - `stop_loss`: Percentage stop-loss (%)
+- `is_paper_trade`: Boolean flag for paper trading mode (default: `false`)
+  - `true`: Simulated trading with virtual balance (no real API calls)
+  - `false`: Live trading with real Indodax API
 
 **Validation Rules**:
 - `buying_price` > 0, must follow Indodax price increments
@@ -50,7 +54,8 @@ The Copilot Bot is an **automated trading assistant** that executes individual t
 - `target_profit` >= 0.1%, <= 1000%
 - `stop_loss` > 0%, <= 100%
 - `stop_loss` < `target_profit`
-- User must have sufficient IDR balance
+- **Live Trading** (`is_paper_trade: false`): User must have valid API key and sufficient IDR balance on Indodax
+- **Paper Trading** (`is_paper_trade: true`): User must have sufficient virtual balance (default: 100M IDR)
 
 ---
 
@@ -97,41 +102,41 @@ func (s *CopilotService) PlaceBuyOrder(userID int64, req *TradeRequest) (*Trade,
     if err := s.validateTradeRequest(req); err != nil {
         return nil, err
     }
-    
+
     // 2. Get user's API credentials
     apiKey, err := s.getAPICredentials(userID)
     if err != nil {
         return nil, err
     }
-    
+
     // 3. Check balance
     balance, err := s.indodaxClient.GetBalance(apiKey)
     if err != nil {
         return nil, err
     }
-    
+
     if balance["idr"] < req.VolumeIDR {
         return nil, errors.New("Insufficient IDR balance")
     }
-    
+
     // 4. Calculate amount
     amount := req.VolumeIDR / req.BuyingPrice
-    
+
     // 5. Round to volume precision
     coin := s.getCoin(req.Pair)
     amount = roundToDecimal(amount, coin.VolumePrecision)
-    
+
     // 6. Validate minimum volume
     if amount < coin.MinVolume {
         return nil, fmt.Errorf("Amount %.8f below minimum %.8f", amount, coin.MinVolume)
     }
-    
+
     // 7. Place buy order on Indodax
     result, err := s.indodaxClient.PlaceOrder("buy", req.Pair, req.BuyingPrice, amount)
     if err != nil {
         return nil, err
     }
-    
+
     // 8. Create trade record
     trade := &models.Trade{
         UserID:        userID,
@@ -145,15 +150,15 @@ func (s *CopilotService) PlaceBuyOrder(userID int64, req *TradeRequest) (*Trade,
         Status:        "pending",
         CreatedAt:     time.Now(),
     }
-    
+
     s.tradeRepo.Create(trade)
-    
+
     // 9. Subscribe to order updates (Private WebSocket)
     s.subscribeOrderUpdate(userID, result.OrderID, trade.ID)
-    
+
     // 10. Broadcast to user
     s.broadcastTradeUpdate(userID, "trade_created", trade)
-    
+
     return trade, nil
 }
 ```
@@ -169,25 +174,25 @@ func (s *CopilotService) handleBuyOrderFilled(trade *models.Trade, filledAmount 
     trade.BuyFilledAmount = filledAmount
     trade.BuyFilledAt = time.Now()
     s.tradeRepo.Update(trade)
-    
+
     // 2. Fetch current balance
     balance, err := s.indodaxClient.GetBalance(trade.UserID)
     if err != nil {
         s.logger.Error.Printf("Failed to fetch balance: %v", err)
         return
     }
-    
+
     // 3. Calculate sell price (buy price + profit target)
     sellPrice := trade.BuyPrice * (1 + trade.TargetProfit/100)
-    
+
     // 4. Round to price precision
     coin := s.getCoin(trade.Pair)
     sellPrice = roundToDecimal(sellPrice, coin.PricePrecision)
-    
+
     // 5. Determine sell amount (all available coins)
     baseCurrency := strings.TrimSuffix(trade.Pair, "idr")
     sellAmount := balance[baseCurrency]
-    
+
     // 6. Place sell order on Indodax
     result, err := s.indodaxClient.PlaceOrder("sell", trade.Pair, sellPrice, sellAmount)
     if err != nil {
@@ -197,22 +202,22 @@ func (s *CopilotService) handleBuyOrderFilled(trade *models.Trade, filledAmount 
         s.tradeRepo.Update(trade)
         return
     }
-    
+
     // 7. Update trade with sell order info
     trade.SellOrderID = result.OrderID
     trade.SellPrice = sellPrice
     trade.SellAmount = sellAmount
     s.tradeRepo.Update(trade)
-    
+
     // 8. Subscribe to sell order updates
     s.subscribeOrderUpdate(trade.UserID, result.OrderID, trade.ID)
-    
+
     // 9. Start stop-loss monitoring
     s.startStopLossMonitor(trade)
-    
+
     // 10. Broadcast update
     s.broadcastTradeUpdate(trade.UserID, "sell_order_placed", trade)
-    
+
     s.logger.Info.Printf("Auto-placed sell order: %s @ %.2f", trade.Pair, sellPrice)
 }
 ```
@@ -226,7 +231,7 @@ func (s *CopilotService) startStopLossMonitor(trade *models.Trade) {
     go func() {
         ticker := time.NewTicker(1 * time.Second)
         defer ticker.Stop()
-        
+
         for {
             select {
             case <-ticker.C:
@@ -235,13 +240,13 @@ func (s *CopilotService) startStopLossMonitor(trade *models.Trade) {
                 if currentTrade.Status != "filled" {
                     return // Trade no longer active
                 }
-                
+
                 // Get current market price
                 currentPrice := s.getCurrentPrice(trade.Pair)
-                
+
                 // Calculate stop-loss price
                 stopLossPrice := trade.BuyPrice * (1 - trade.StopLoss/100)
-                
+
                 // Check if stop-loss triggered
                 if currentPrice <= stopLossPrice {
                     s.triggerStopLoss(trade, currentPrice)
@@ -255,7 +260,7 @@ func (s *CopilotService) startStopLossMonitor(trade *models.Trade) {
 func (s *CopilotService) triggerStopLoss(trade *models.Trade, currentPrice float64) {
     s.logger.Warn.Printf("Stop-loss triggered for trade %d: %.2f <= %.2f",
         trade.ID, currentPrice, trade.BuyPrice*(1-trade.StopLoss/100))
-    
+
     // 1. Cancel existing sell order
     if trade.SellOrderID != "" {
         err := s.indodaxClient.CancelOrder(trade.Pair, trade.SellOrderID)
@@ -263,21 +268,21 @@ func (s *CopilotService) triggerStopLoss(trade *models.Trade, currentPrice float
             s.logger.Error.Printf("Failed to cancel sell order: %v", err)
         }
     }
-    
+
     // 2. Place market sell order
     result, err := s.indodaxClient.PlaceOrder("sell", trade.Pair, currentPrice, trade.SellAmount, "market")
     if err != nil {
         s.logger.Error.Printf("Failed to place stop-loss sell: %v", err)
         return
     }
-    
+
     // 3. Update trade
     trade.Status = "stopped"
     trade.SellOrderID = result.OrderID
     trade.SellPrice = currentPrice
     trade.StopLossTriggered = true
     s.tradeRepo.Update(trade)
-    
+
     // 4. Broadcast alert
     s.broadcastTradeUpdate(trade.UserID, "stop_loss_triggered", trade)
 }
@@ -294,7 +299,7 @@ func (s *CopilotService) handleSellOrderFilled(trade *models.Trade, filledAmount
     buySpent := trade.BuyFilledAmount * trade.BuyPrice
     profitIDR := sellRevenue - buySpent
     profitPercent := (profitIDR / buySpent) * 100
-    
+
     // 2. Update trade
     trade.Status = "completed"
     trade.SellFilledAmount = filledAmount
@@ -302,10 +307,10 @@ func (s *CopilotService) handleSellOrderFilled(trade *models.Trade, filledAmount
     trade.ProfitIDR = profitIDR
     trade.ProfitPercent = profitPercent
     s.tradeRepo.Update(trade)
-    
+
     // 3. Broadcast update
     s.broadcastTradeUpdate(trade.UserID, "trade_completed", trade)
-    
+
     s.logger.Info.Printf("Trade %d completed: profit %.2f IDR (%.2f%%)",
         trade.ID, profitIDR, profitPercent)
 }
@@ -322,12 +327,12 @@ func (s *CopilotService) ManualSell(userID, tradeID int64) error {
     if err != nil || trade.UserID != userID {
         return errors.New("Trade not found")
     }
-    
+
     // 2. Validate status
     if trade.Status != "filled" {
         return errors.New("Trade not in filled status")
     }
-    
+
     // 3. Cancel existing sell order
     if trade.SellOrderID != "" {
         err := s.indodaxClient.CancelOrder(trade.Pair, trade.SellOrderID)
@@ -335,28 +340,28 @@ func (s *CopilotService) ManualSell(userID, tradeID int64) error {
             s.logger.Warn.Printf("Failed to cancel sell order: %v", err)
         }
     }
-    
+
     // 4. Get current market price
     currentPrice := s.getCurrentPrice(trade.Pair)
-    
+
     // 5. Place market sell order
     result, err := s.indodaxClient.PlaceOrder("sell", trade.Pair, currentPrice, trade.SellAmount, "market")
     if err != nil {
         return err
     }
-    
+
     // 6. Update trade
     trade.SellOrderID = result.OrderID
     trade.SellPrice = currentPrice
     trade.ManualSell = true
     s.tradeRepo.Update(trade)
-    
+
     // 7. Subscribe to order updates
     s.subscribeOrderUpdate(userID, result.OrderID, trade.ID)
-    
+
     // 8. Broadcast update
     s.broadcastTradeUpdate(userID, "manual_sell_placed", trade)
-    
+
     return nil
 }
 ```
@@ -372,26 +377,26 @@ func (s *CopilotService) CancelBuyOrder(userID, tradeID int64) error {
     if err != nil || trade.UserID != userID {
         return errors.New("Trade not found")
     }
-    
+
     // 2. Validate status
     if trade.Status != "pending" {
         return errors.New("Can only cancel pending orders")
     }
-    
+
     // 3. Cancel on Indodax
     err = s.indodaxClient.CancelOrder(trade.Pair, trade.BuyOrderID)
     if err != nil {
         return err
     }
-    
+
     // 4. Update trade
     trade.Status = "cancelled"
     trade.CancelledAt = time.Now()
     s.tradeRepo.Update(trade)
-    
+
     // 5. Broadcast update
     s.broadcastTradeUpdate(userID, "trade_cancelled", trade)
-    
+
     return nil
 }
 ```
@@ -407,7 +412,7 @@ type Trade struct {
     ID              int64     `json:"id"`
     UserID          int64     `json:"user_id"`
     Pair            string    `json:"pair"`
-    
+
     // Buy order
     BuyOrderID      string    `json:"buy_order_id"`
     BuyPrice        float64   `json:"buy_price"`
@@ -415,30 +420,30 @@ type Trade struct {
     BuyAmountIDR    float64   `json:"buy_amount_idr"`
     BuyFilledAmount float64   `json:"buy_filled_amount"`
     BuyFilledAt     time.Time `json:"buy_filled_at"`
-    
+
     // Sell order
     SellOrderID      string    `json:"sell_order_id"`
     SellPrice        float64   `json:"sell_price"`
     SellAmount       float64   `json:"sell_amount"`
     SellFilledAmount float64   `json:"sell_filled_amount"`
     SellFilledAt     time.Time `json:"sell_filled_at"`
-    
+
     // Parameters
     TargetProfit    float64   `json:"target_profit"`
     StopLoss        float64   `json:"stop_loss"`
-    
+
     // Profit
     ProfitIDR       float64   `json:"profit_idr"`
     ProfitPercent   float64   `json:"profit_percent"`
-    
+
     // Flags
     StopLossTriggered bool    `json:"stop_loss_triggered"`
     ManualSell        bool    `json:"manual_sell"`
-    
+
     // Status
     Status          string    `json:"status"`  // pending, filled, completed, cancelled, stopped, error
     ErrorMessage    string    `json:"error_message"`
-    
+
     // Timestamps
     CreatedAt       time.Time `json:"created_at"`
     CancelledAt     time.Time `json:"cancelled_at"`
@@ -488,10 +493,10 @@ Members: trade_id (only filled trades)
 CREATE TABLE trades (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
-    
+
     -- Pair
     pair VARCHAR(20) NOT NULL,
-    
+
     -- Buy order
     buy_order_id VARCHAR(255) NOT NULL,
     buy_price NUMERIC(20,8) NOT NULL,
@@ -499,34 +504,34 @@ CREATE TABLE trades (
     buy_amount_idr NUMERIC(20,2) NOT NULL,
     buy_filled_amount NUMERIC(20,8),
     buy_filled_at TIMESTAMP,
-    
+
     -- Sell order
     sell_order_id VARCHAR(255),
     sell_price NUMERIC(20,8),
     sell_amount NUMERIC(20,8),
     sell_filled_amount NUMERIC(20,8),
     sell_filled_at TIMESTAMP,
-    
+
     -- Parameters
     target_profit NUMERIC(10,4) NOT NULL,
     stop_loss NUMERIC(10,4) NOT NULL,
-    
+
     -- Profit
     profit_idr NUMERIC(20,2),
     profit_percent NUMERIC(10,4),
-    
+
     -- Flags
     stop_loss_triggered BOOLEAN DEFAULT FALSE,
     manual_sell BOOLEAN DEFAULT FALSE,
-    
+
     -- Status
     status VARCHAR(50) NOT NULL,
     error_message TEXT,
-    
+
     -- Timestamps
     created_at TIMESTAMP DEFAULT NOW(),
     cancelled_at TIMESTAMP,
-    
+
     -- Indexes
     UNIQUE(buy_order_id)
 );
@@ -752,14 +757,14 @@ Manual sell (market price)
 func (c *IndodaxClient) GeneratePrivateWSToken() (string, error) {
     endpoint := "https://indodax.com/api/private_ws/v1/generate_token"
     nonce := time.Now().UnixMilli()
-    
+
     payload := fmt.Sprintf("nonce=%d", nonce)
     signature := createHMAC512(payload, c.secret)
-    
+
     req := http.NewRequest("POST", endpoint, strings.NewReader(payload))
     req.Header.Set("Key", c.key)
     req.Header.Set("Sign", signature)
-    
+
     resp, err := c.httpClient.Do(req)
     // ... parse token from response
 }
@@ -769,20 +774,20 @@ func (c *IndodaxClient) GeneratePrivateWSToken() (string, error) {
 ```go
 func (c *IndodaxClient) SubscribeOrderUpdates(token string) {
     conn, _ := websocket.Dial("wss://pws.indodax.com/ws/")
-    
+
     // Authenticate
     conn.WriteJSON(map[string]interface{}{
         "params": map[string]string{"token": token},
         "id": 1,
     })
-    
+
     // Subscribe to order channel
     conn.WriteJSON(map[string]interface{}{
         "method": "subscribe",
         "params": map[string]interface{}{"channel": "order"},
         "id": 2,
     })
-    
+
     // Listen for updates
     go c.listenOrderUpdates(conn)
 }
@@ -928,4 +933,3 @@ The Copilot Bot is perfect for:
 - Stop-loss protection
 - Manual override available
 - Real-time status updates
-

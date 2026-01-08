@@ -1,3 +1,4 @@
+// Package repository provides data access for the application and interacts with Redis.
 package repository
 
 import (
@@ -65,7 +66,7 @@ func (r *UserRepository) Create(ctx context.Context, user *model.User) error {
 // GetByID gets a user by ID
 func (r *UserRepository) GetByID(ctx context.Context, userID string) (*model.User, error) {
 	userKey := redis.UserKey(userID)
-	
+
 	var user model.User
 	if err := r.redis.GetJSON(ctx, userKey, &user); err != nil {
 		if err == redislib.Nil {
@@ -110,7 +111,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*model.U
 // Update updates a user
 func (r *UserRepository) Update(ctx context.Context, user *model.User) error {
 	user.UpdatedAt = time.Now()
-	
+
 	userKey := redis.UserKey(user.ID)
 	return r.redis.SetJSON(ctx, userKey, user, 0)
 }
@@ -182,7 +183,7 @@ func (r *UserRepository) List(ctx context.Context) ([]*model.User, error) {
 // CreateSession creates a new session
 func (r *UserRepository) CreateSession(ctx context.Context, session *model.Session) error {
 	sessionKey := redis.SessionKey(session.ID)
-	
+
 	// Store session
 	if err := r.redis.SetJSON(ctx, sessionKey, session, time.Until(session.ExpiresAt)); err != nil {
 		return err
@@ -200,7 +201,7 @@ func (r *UserRepository) CreateSession(ctx context.Context, session *model.Sessi
 // GetSession gets a session by ID
 func (r *UserRepository) GetSession(ctx context.Context, sessionID string) (*model.Session, error) {
 	sessionKey := redis.SessionKey(sessionID)
-	
+
 	var session model.Session
 	if err := r.redis.GetJSON(ctx, sessionKey, &session); err != nil {
 		if err == redislib.Nil {
@@ -238,7 +239,7 @@ func (r *UserRepository) DeleteSession(ctx context.Context, sessionID string) er
 // DeleteUserSessions deletes all sessions for a user
 func (r *UserRepository) DeleteUserSessions(ctx context.Context, userID string) error {
 	userSessionsKey := redis.UserSessionsKey(userID)
-	
+
 	// Get all session IDs
 	sessionIDs, err := r.redis.SMembers(ctx, userSessionsKey)
 	if err != nil {
@@ -279,4 +280,3 @@ func (r *UserRepository) UpdateAPIKeyStatus(ctx context.Context, userID string, 
 	user.HasAPIKey = hasAPIKey
 	return r.Update(ctx, user)
 }
-

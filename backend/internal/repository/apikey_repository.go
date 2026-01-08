@@ -1,3 +1,4 @@
+// Package repository provides data access for the application and interacts with Redis.
 package repository
 
 import (
@@ -31,7 +32,7 @@ func (r *APIKeyRepository) Create(ctx context.Context, apiKey *model.APIKey) err
 // Get gets an API key by user ID
 func (r *APIKeyRepository) Get(ctx context.Context, userID string) (*model.APIKey, error) {
 	key := redis.APIKeyKey(userID)
-	
+
 	var apiKey model.APIKey
 	if err := r.redis.GetJSON(ctx, key, &apiKey); err != nil {
 		if err == redislib.Nil {
@@ -59,4 +60,5 @@ func (r *APIKeyRepository) Exists(ctx context.Context, userID string) (bool, err
 	key := redis.APIKeyKey(userID)
 	return r.redis.Exists(ctx, key)
 }
+
 

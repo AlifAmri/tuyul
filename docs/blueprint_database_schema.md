@@ -39,7 +39,7 @@ Fields:
   last_login_at    → Unix timestamp (milliseconds)
 
 Example:
-HSET user:550e8400-e29b-41d4-a716-446655440000 
+HSET user:550e8400-e29b-41d4-a716-446655440000
   id "550e8400-e29b-41d4-a716-446655440000"
   username "john_doe"
   email "john@example.com"
@@ -200,8 +200,10 @@ SET apikey_by_id:apikey-uuid "550e8400-e29b-41d4-a716-446655440000"
 Key: order:{order_id}
 Type: Hash
 Fields:
-  id                  → UUID
+  id                  → UUID (Internal ID)
   user_id             → UUID
+  parent_id           → UUID (ID of Trade, Position, or BotConfig)
+  parent_type         → String ("trade", "position", "bot")
   pair                → String (e.g., "btcidr")
   side                → String ("buy" or "sell")
   order_type          → String ("limit" or "market")
@@ -210,7 +212,7 @@ Fields:
   amount_idr          → Float (as string)
   filled              → Float (as string)
   status              → String ("pending", "open", "filled", "cancelled", "failed", "stopped")
-  indodax_order_id    → String
+  order_id            → String (Indodax Order ID)
   target_profit       → Float (percentage)
   stop_loss           → Float (percentage)
   buy_order_id        → UUID (for sell orders)
@@ -293,9 +295,50 @@ Type: String
 Value: {sell_order_id}
 
 Purpose: Link buy order to its auto-generated sell order
+```
+
+#### Indodax Order ID Mapping
+```
+Key: order_id_map:{indodax_order_id}
+Type: String
+Value: {internal_order_id}
+
+Purpose: Efficiently find internal order record from WebSocket updates
+```
+
+#### Paper Trading Balances (User)
+```
+Key: paper_balance:user:{user_id}
+Type: String (JSON)
+Value: {"idr": 100000000, "btc": 0.5, ...}
+TTL: None (persistent)
+
+Purpose: Track virtual balances for user's manual/copilot paper trades
 
 Example:
-SET buy_sell_map:order-uuid-1 "order-uuid-2"
+SET paper_balance:user:550e8400-e29b-41d4-a716-446655440000
+  '{"idr": 98500000, "btc": 0.00153846}'
+
+Default Balance (if not exists):
+{
+  "idr": 100000000  // 100 million IDR
+}
+```
+
+#### Paper Trading Balances (Bot)
+```
+Key: paper_balance:bot:{bot_id}
+Type: String (JSON)
+Value: {"idr": 50000000, "eth": 1.2, ...}
+TTL: None (persistent)
+
+Purpose: Track virtual balances for bot instance paper trades
+
+Example:
+SET paper_balance:bot:123
+  '{"idr": 48750000, "eth": 1.2}'
+
+Note: Bot balances are initialized from bot.InitialBalanceIDR when bot is created
 ```
 
 ---
@@ -619,6 +662,7 @@ HSET config:system
 - Order by User: `user_orders:{user_id}` (sorted set by timestamp)
 - Order by Status: `orders_by_status:{status}` (set)
 - Order by Pair: `pair_orders:{pair}` (set)
+- Indodax ID → Internal ID: `order_id_map:{indodax_order_id}` (string)
 
 ### 3. Lookups
 - Find user by username: `GET username_index:{username}` → `HGETALL user:{user_id}`
@@ -840,4 +884,3 @@ return 1
 - **Sentinel**: For high availability
 - **Redis Enterprise**: For production-grade features
 - **TimeSeries**: For historical market data (Redis TimeSeries module)
-

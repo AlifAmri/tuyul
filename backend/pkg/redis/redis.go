@@ -13,6 +13,12 @@ type Client struct {
 	client *redis.Client
 }
 
+// Z is a type alias for sorted set members
+type Z = redis.Z
+
+// Pipeliner is a type alias for redis pipeliner
+type Pipeliner = redis.Pipeliner
+
 // Config holds Redis configuration
 type Config struct {
 	Host     string
@@ -224,4 +230,3 @@ func (c *Client) Decr(ctx context.Context, key string) (int64, error) {
 func (c *Client) DecrBy(ctx context.Context, key string, value int64) (int64, error) {
 	return c.client.DecrBy(ctx, key, value).Result()
 }
-

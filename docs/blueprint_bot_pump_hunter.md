@@ -4,9 +4,9 @@
 
 The Pump Hunter Bot is an **event-driven momentum trading strategy** that identifies and trades rapid price increases ("pumps") across all Indodax trading pairs simultaneously. It uses multi-timeframe analysis and pump score calculation to detect buying pressure and automatically opens/closes positions based on profit targets and stop-loss conditions.
 
-**Strategy Type**: Momentum / Trend following  
-**Risk Level**: High  
-**Suitable Markets**: Volatile markets with pump activity  
+**Strategy Type**: Momentum / Trend following
+**Risk Level**: High
+**Suitable Markets**: Volatile markets with pump activity
 **Timeframe**: Minutes to hours per position
 
 ---
@@ -187,6 +187,50 @@ type Coin struct {
 }
 ```
 
+### Signal Buffering and Prioritization
+
+**Problem**: When multiple coins pump simultaneously, the bot needs to decide which signals to act on first.
+
+**Solution**: Signal buffering with priority-based processing:
+
+```go
+type PumpSignal struct {
+    Coin      *model.Coin
+    Score     float64
+    Timestamp time.Time
+}
+
+type PumpHunterInstance struct {
+    SignalBuffer  map[string]*PumpSignal  // pair -> signal
+    signalMu      sync.Mutex
+    // ... other fields
+}
+```
+
+**How It Works**:
+
+1. **Buffer Signals**: When a coin update arrives with a pump score above threshold, it's added to the signal buffer (not immediately executed)
+2. **Process by Priority**: A background goroutine processes buffered signals every 1 second, sorted by pump score (highest first)
+3. **Respect Limits**: Only opens positions up to `max_concurrent_positions` limit
+4. **Overwrite Lower Scores**: If a pair already has a buffered signal, only keep the one with the higher score
+
+**Benefits**:
+- ✅ Prioritizes strongest signals when multiple pumps occur
+- ✅ Prevents opening too many positions at once
+- ✅ Reduces noise from rapid score fluctuations
+- ✅ Ensures best use of available capital
+
+**Example Scenario**:
+```
+Time 10:00:00 - BTC pumps (score: 75) → buffered
+Time 10:00:01 - ETH pumps (score: 85) → buffered
+Time 10:00:02 - DOGE pumps (score: 60) → buffered
+Time 10:00:03 - Process signals:
+  1. ETH (85) → Open position ✓
+  2. BTC (75) → Open position ✓
+  3. DOGE (60) → Skip (max positions reached)
+```
+
 ---
 
 ## Core Trading Logic
@@ -198,16 +242,16 @@ type Coin struct {
 ```go
 func (s *PumpBotService) checkEntryConditions(inst *BotInstance, coin *models.Coin) bool {
     config := inst.Config
-    
+
     // 1. Check pump score
     if coin.PumpScore < config.EntryRules.MinPumpScore {
         return false
     }
-    
+
     // 2. Check positive timeframes
     positiveCount := 0
     tf := coin.Timeframes
-    
+
     if coin.CurrentPrice > tf.OneMinute.Open {
         positiveCount++
     }
@@ -220,35 +264,35 @@ func (s *PumpBotService) checkEntryConditions(inst *BotInstance, coin *models.Co
     if coin.CurrentPrice > tf.ThirtyMin.Open {
         positiveCount++
     }
-    
+
     if positiveCount < config.EntryRules.MinTimeframesPositive {
         return false
     }
-    
+
     // 3. Check 24h volume
     if coin.VolumeIDR < config.EntryRules.Min24hVolumeIDR {
         return false
     }
-    
+
     // 4. Check minimum price
     if coin.CurrentPrice < config.EntryRules.MinPriceIDR {
         return false
     }
-    
+
     // 5. Check if pair is excluded
     for _, excluded := range config.EntryRules.ExcludedPairs {
         if excluded == coin.PairID {
             return false
         }
     }
-    
+
     // 6. Check if already have position on this pair
     for _, pos := range inst.OpenPositions {
         if pos.Pair == coin.PairID {
             return false
         }
     }
-    
+
     return true
 }
 ```
@@ -279,12 +323,12 @@ Before opening position:
 ```go
 func (s *PumpBotService) canOpenNewPosition(inst *BotInstance) bool {
     config := inst.Config
-    
+
     // 1. Max concurrent positions
     if len(inst.OpenPositions) >= config.RiskManagement.MaxConcurrentPositions {
         return false
     }
-    
+
     // 2. Cooldown after loss
     if config.RiskManagement.CooldownAfterLossMinutes > 0 {
         cooldown := time.Duration(config.RiskManagement.CooldownAfterLossMinutes) * time.Minute
@@ -292,7 +336,7 @@ func (s *PumpBotService) canOpenNewPosition(inst *BotInstance) bool {
             return false
         }
     }
-    
+
     // 3. Daily loss limit
     if config.RiskManagement.DailyLossLimitIDR > 0 {
         if inst.DailyLoss >= config.RiskManagement.DailyLossLimitIDR {
@@ -301,7 +345,7 @@ func (s *PumpBotService) canOpenNewPosition(inst *BotInstance) bool {
             return false
         }
     }
-    
+
     return true
 }
 ```
@@ -311,7 +355,7 @@ func (s *PumpBotService) canOpenNewPosition(inst *BotInstance) bool {
 ```go
 func (s *PumpBotService) calculatePositionSize(inst *BotInstance) float64 {
     config := inst.Config
-    
+
     // Get available balance
     var balance float64
     if config.IsPaperTrading {
@@ -320,7 +364,7 @@ func (s *PumpBotService) calculatePositionSize(inst *BotInstance) float64 {
         info, _ := inst.TradeClient.GetInfo()
         balance = info.Balance["idr"]
     }
-    
+
     // Respect minimum balance
     if config.RiskManagement.MinBalanceIDR > 0 {
         if balance <= config.RiskManagement.MinBalanceIDR {
@@ -328,18 +372,18 @@ func (s *PumpBotService) calculatePositionSize(inst *BotInstance) float64 {
         }
         balance -= config.RiskManagement.MinBalanceIDR
     }
-    
+
     // Use MaxPositionIDR or available balance, whichever is smaller
     positionSize := config.RiskManagement.MaxPositionIDR
     if balance < positionSize {
         positionSize = balance
     }
-    
+
     // Minimum 10k IDR per position
     if positionSize < 10000 {
         return 0
     }
-    
+
     return positionSize
 }
 ```
@@ -350,20 +394,20 @@ func (s *PumpBotService) calculatePositionSize(inst *BotInstance) float64 {
 func (s *PumpBotService) openPosition(inst *BotInstance, coin *models.Coin, positionSizeIDR float64) {
     config := inst.Config
     pair := coin.PairID
-    
+
     // Calculate entry price (use market buy)
     entryPrice := coin.CurrentPrice
-    
+
     // Calculate quantity
     quantity := positionSizeIDR / entryPrice
-    
+
     // Place buy order (market)
     result, err := inst.TradeClient.Trade("buy", pair, entryPrice, quantity, "market")
     if err != nil {
         s.logger.Error.Printf("Failed to place buy order: %v", err)
         return
     }
-    
+
     // Create position record
     position := &models.Position{
         BotConfigID:    inst.BotID,
@@ -381,9 +425,9 @@ func (s *PumpBotService) openPosition(inst *BotInstance, coin *models.Coin, posi
         LowestPrice:    entryPrice,
         IsPaperTrade:   config.IsPaperTrading,
     }
-    
+
     s.positionRepo.Create(position)
-    
+
     // Save buy order
     order := &models.Order{
         BotConfigID:  inst.BotID,
@@ -398,7 +442,7 @@ func (s *PumpBotService) openPosition(inst *BotInstance, coin *models.Coin, posi
         IsPaperTrade: config.IsPaperTrading,
     }
     s.orderRepo.Create(order)
-    
+
     // Track order fulfillment
     if !config.IsPaperTrading {
         inst.OrderTracker.TrackOrder(result.OrderID, func(filledOrder *Order) {
@@ -408,17 +452,17 @@ func (s *PumpBotService) openPosition(inst *BotInstance, coin *models.Coin, posi
         // Paper trading: mark as filled immediately
         position.Status = "open"
         s.positionRepo.UpdateStatus(position.ID, "open")
-        
+
         // Update balance
         config.PaperBalance["idr"] -= positionSizeIDR
         baseCurrency := strings.TrimSuffix(pair, "idr")
         config.PaperBalance[baseCurrency] += quantity
         s.botRepo.UpdatePaperBalance(inst.BotID, config.PaperBalance)
     }
-    
+
     // Add to open positions
     inst.OpenPositions[position.ID] = position
-    
+
     s.logger.Info.Printf("Opened position %d: %s @ %.8f, amount: %.2f IDR, score: %.2f",
         position.ID, pair, entryPrice, positionSizeIDR, coin.PumpScore)
 }
@@ -434,11 +478,11 @@ func (s *PumpBotService) processOpenPositions(inst *BotInstance) {
         if position.Status != "open" {
             continue
         }
-        
+
         // Get current price
         coin, _ := s.coinRepo.GetByPairID(position.Pair)
         currentPrice := coin.CurrentPrice
-        
+
         // Update highest/lowest
         if currentPrice > position.HighestPrice {
             position.HighestPrice = currentPrice
@@ -448,10 +492,10 @@ func (s *PumpBotService) processOpenPositions(inst *BotInstance) {
             position.LowestPrice = currentPrice
             s.positionRepo.UpdateLowestPrice(position.ID, currentPrice)
         }
-        
+
         // Check exit conditions
         exitReason := s.checkExitConditions(inst, position, coin)
-        
+
         if exitReason != "" {
             s.closePosition(inst, position, currentPrice, exitReason)
         }
@@ -465,20 +509,20 @@ func (s *PumpBotService) processOpenPositions(inst *BotInstance) {
 func (s *PumpBotService) checkExitConditions(inst *BotInstance, position *models.Position, coin *models.Coin) string {
     config := inst.Config
     currentPrice := coin.CurrentPrice
-    
+
     // Calculate profit %
     profitPercent := (currentPrice - position.EntryPrice) / position.EntryPrice * 100
-    
+
     // 1. Take profit
     if profitPercent >= config.ExitRules.TargetProfitPercent {
         return "take_profit"
     }
-    
+
     // 2. Stop loss
     if profitPercent <= -config.ExitRules.StopLossPercent {
         return "stop_loss"
     }
-    
+
     // 3. Trailing stop
     if config.ExitRules.TrailingStopEnabled {
         dropFromHighest := (position.HighestPrice - currentPrice) / position.HighestPrice * 100
@@ -486,7 +530,7 @@ func (s *PumpBotService) checkExitConditions(inst *BotInstance, position *models
             return "trailing_stop"
         }
     }
-    
+
     // 4. Max hold time
     if config.ExitRules.MaxHoldMinutes > 0 {
         holdDuration := time.Since(position.EntryAt)
@@ -495,14 +539,14 @@ func (s *PumpBotService) checkExitConditions(inst *BotInstance, position *models
             return "max_hold_time"
         }
     }
-    
+
     // 5. Pump score drop
     if config.ExitRules.ExitOnPumpScoreDrop {
         if coin.PumpScore < config.ExitRules.PumpScoreDropThreshold {
             return "pump_score_drop"
         }
     }
-    
+
     return ""
 }
 ```
@@ -513,20 +557,20 @@ func (s *PumpBotService) checkExitConditions(inst *BotInstance, position *models
 func (s *PumpBotService) closePosition(inst *BotInstance, position *models.Position, exitPrice float64, reason string) {
     config := inst.Config
     pair := position.Pair
-    
+
     // Place sell order (market)
     result, err := inst.TradeClient.Trade("sell", pair, exitPrice, position.EntryQuantity, "market")
     if err != nil {
         s.logger.Error.Printf("Failed to place sell order: %v", err)
         return
     }
-    
+
     // Update position
     position.Status = "selling"
     position.ExitOrderID = &result.OrderID
     position.CloseReason = &reason
     s.positionRepo.UpdateStatus(position.ID, "selling")
-    
+
     // Save sell order
     order := &models.Order{
         BotConfigID:  inst.BotID,
@@ -541,7 +585,7 @@ func (s *PumpBotService) closePosition(inst *BotInstance, position *models.Posit
         IsPaperTrade: config.IsPaperTrading,
     }
     s.orderRepo.Create(order)
-    
+
     // Track order fulfillment
     if !config.IsPaperTrading {
         inst.OrderTracker.TrackOrder(result.OrderID, func(filledOrder *Order) {
@@ -551,7 +595,7 @@ func (s *PumpBotService) closePosition(inst *BotInstance, position *models.Posit
         // Paper trading: finalize immediately
         s.finalizePositionClose(inst, position, exitPrice)
     }
-    
+
     s.logger.Info.Printf("Closing position %d: %s @ %.8f, reason: %s",
         position.ID, pair, exitPrice, reason)
 }
@@ -562,12 +606,12 @@ func (s *PumpBotService) closePosition(inst *BotInstance, position *models.Posit
 ```go
 func (s *PumpBotService) finalizePositionClose(inst *BotInstance, position *models.Position, exitPrice float64) {
     config := inst.Config
-    
+
     // Calculate profit
     exitAmountIDR := exitPrice * position.EntryQuantity
     profitIDR := exitAmountIDR - position.EntryAmountIDR
     profitPercent := profitIDR / position.EntryAmountIDR * 100
-    
+
     // Update position
     now := time.Now()
     position.Status = "closed"
@@ -577,25 +621,25 @@ func (s *PumpBotService) finalizePositionClose(inst *BotInstance, position *mode
     position.ExitAt = &now
     position.ProfitIDR = &profitIDR
     position.ProfitPercent = &profitPercent
-    
+
     s.positionRepo.UpdateStatus(position.ID, "closed")
     s.positionRepo.UpdateProfit(position.ID, profitIDR, profitPercent)
-    
+
     // Update bot statistics
     config.TotalTrades++
     if profitIDR > 0 {
         config.WinningTrades++
     }
     config.TotalProfitIDR += profitIDR
-    
+
     s.botRepo.UpdateStats(config.ID, config.TotalTrades, config.WinningTrades, config.TotalProfitIDR)
-    
+
     // Update daily loss tracking
     if profitIDR < 0 {
         inst.DailyLoss += math.Abs(profitIDR)
         inst.LastLossTime = time.Now()
     }
-    
+
     // Update balance
     if config.IsPaperTrading {
         config.PaperBalance["idr"] += exitAmountIDR
@@ -607,13 +651,13 @@ func (s *PumpBotService) finalizePositionClose(inst *BotInstance, position *mode
         info, _ := inst.TradeClient.GetInfo()
         s.syncLiveBalance(inst.BotID, info.Balance)
     }
-    
+
     // Remove from open positions
     delete(inst.OpenPositions, position.ID)
-    
+
     // Broadcast update
     s.broadcastPositionClose(position)
-    
+
     s.logger.Info.Printf("Position %d closed: profit %.2f IDR (%.2f%%), reason: %s",
         position.ID, profitIDR, profitPercent, *position.CloseReason)
 }
@@ -697,22 +741,22 @@ CREATE TABLE bot_configs (
     type VARCHAR(50) NOT NULL, -- 'market_maker', 'pump_hunter', 'copilot'
     is_paper_trading BOOLEAN NOT NULL DEFAULT true,
     api_key_id BIGINT REFERENCES api_credentials(id),
-    
+
     -- Pump hunter specific
     entry_rules JSONB,
     exit_rules JSONB,
     risk_management JSONB,
     paper_balance JSONB,
-    
+
     -- Statistics
     total_trades INTEGER NOT NULL DEFAULT 0,
     winning_trades INTEGER NOT NULL DEFAULT 0,
     total_profit_idr NUMERIC(20,2) NOT NULL DEFAULT 0,
-    
+
     -- Status
     status VARCHAR(50) NOT NULL DEFAULT 'stopped',
     error_message TEXT,
-    
+
     -- Timestamps
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
@@ -727,11 +771,11 @@ CREATE TABLE positions (
     bot_config_id BIGINT NOT NULL REFERENCES bot_configs(id) ON DELETE CASCADE,
     user_id BIGINT NOT NULL REFERENCES users(id),
     coin_id BIGINT NOT NULL REFERENCES coins(id),
-    
+
     -- Position details
     pair VARCHAR(20) NOT NULL,
     status VARCHAR(50) NOT NULL, -- buying, open, selling, closed
-    
+
     -- Entry
     entry_price NUMERIC(20,8) NOT NULL,
     entry_quantity NUMERIC(20,8) NOT NULL,
@@ -739,28 +783,28 @@ CREATE TABLE positions (
     entry_order_id VARCHAR(255),
     entry_pump_score NUMERIC(10,2),
     entry_at TIMESTAMP NOT NULL,
-    
+
     -- Exit
     exit_price NUMERIC(20,8),
     exit_quantity NUMERIC(20,8),
     exit_amount_idr NUMERIC(20,2),
     exit_order_id VARCHAR(255),
     exit_at TIMESTAMP,
-    
+
     -- Price tracking
     highest_price NUMERIC(20,8),
     lowest_price NUMERIC(20,8),
-    
+
     -- Profit
     profit_idr NUMERIC(20,2),
     profit_percent NUMERIC(10,4),
-    
+
     -- Close reason
     close_reason VARCHAR(100),
-    
+
     -- Paper trade flag
     is_paper_trade BOOLEAN NOT NULL DEFAULT false,
-    
+
     -- Timestamps
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
@@ -1086,4 +1130,3 @@ The Pump Hunter Bot is a **high-risk, high-reward strategy** for:
 - Fast order execution
 - Strict risk management
 - Active monitoring
-

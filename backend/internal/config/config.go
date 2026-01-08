@@ -33,13 +33,14 @@ type RedisConfig struct {
 	Port     string
 	Password string
 	DB       int
+	Prefix   string
 }
 
 // JWTConfig holds JWT token configuration
 type JWTConfig struct {
-	Secret               string
-	AccessTokenExpire    time.Duration
-	RefreshTokenExpire   time.Duration
+	Secret             string
+	AccessTokenExpire  time.Duration
+	RefreshTokenExpire time.Duration
 }
 
 // EncryptionConfig holds encryption configuration for API keys
@@ -49,9 +50,10 @@ type EncryptionConfig struct {
 
 // IndodaxConfig holds Indodax API configuration
 type IndodaxConfig struct {
-	APIURL        string
-	WSURL         string
-	PrivateWSURL  string
+	APIURL       string
+	WSURL        string
+	WSToken      string
+	PrivateWSURL string
 }
 
 // CORSConfig holds CORS configuration
@@ -84,11 +86,12 @@ func Load() (*Config, error) {
 			Port:     getEnv("REDIS_PORT", "6379"),
 			Password: getEnv("REDIS_PASSWORD", ""),
 			DB:       getEnvAsInt("REDIS_DB", 0),
+			Prefix:   getEnv("REDIS_PREFIX", ""),
 		},
 		JWT: JWTConfig{
-			Secret:               getEnv("JWT_SECRET", ""),
-			AccessTokenExpire:    time.Duration(getEnvAsInt("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 15)) * time.Minute,
-			RefreshTokenExpire:   time.Duration(getEnvAsInt("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7)) * 24 * time.Hour,
+			Secret:             getEnv("JWT_SECRET", ""),
+			AccessTokenExpire:  time.Duration(getEnvAsInt("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 15)) * time.Minute,
+			RefreshTokenExpire: time.Duration(getEnvAsInt("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7)) * 24 * time.Hour,
 		},
 		Encryption: EncryptionConfig{
 			Key: getEnv("ENCRYPTION_KEY", ""),
@@ -96,6 +99,7 @@ func Load() (*Config, error) {
 		Indodax: IndodaxConfig{
 			APIURL:       getEnv("INDODAX_API_URL", "https://indodax.com"),
 			WSURL:        getEnv("INDODAX_WS_URL", "wss://ws3.indodax.com/ws/"),
+			WSToken:      getEnv("INDODAX_WS_TOKEN", ""),
 			PrivateWSURL: getEnv("INDODAX_PRIVATE_WS_URL", "wss://pws.indodax.com/ws/"),
 		},
 		CORS: CORSConfig{
@@ -171,4 +175,3 @@ func getEnvAsSlice(key string, defaultValue []string, separator string) []string
 	}
 	return strings.Split(valueStr, separator)
 }
-

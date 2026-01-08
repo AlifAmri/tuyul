@@ -1,0 +1,1785 @@
+openapi: 3.0.3
+info:
+  title: TUYUL Trading Bot API
+  description: |
+    TUYUL is a cryptocurrency trading automation platform for Indodax exchange.
+
+    Features:
+    - **Copilot Trading**: Manual trade execution with automated exit strategies
+    - **Market Maker Bot**: Spread-capturing automated trading
+    - **Pump Hunter Bot**: Momentum-based automated trading
+    - **Real-time Market Analysis**: Multi-timeframe pump detection
+    - **Paper Trading**: Risk-free simulation mode
+
+    All endpoints require JWT authentication except health checks and auth endpoints.
+  version: 1.0.0
+  contact:
+    name: TUYUL API Support
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.tuyul.example.com
+    description: Production server (example)
+
+tags:
+  - name: Health
+    description: Health check endpoints
+  - name: Authentication
+    description: User authentication and authorization
+  - name: Users
+    description: User management (admin only)
+  - name: API Keys
+    description: Indodax API key management
+  - name: Market Data
+    description: Real-time market data and analysis
+  - name: Copilot
+    description: Manual trading with automated exits
+  - name: Bots
+    description: Automated trading bots (Market Maker & Pump Hunter)
+  - name: WebSocket
+    description: Real-time updates via WebSocket
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from /auth/login
+
+  schemas:
+    # Common Response Schemas
+    SuccessResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required:
+        - success
+        - error
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: "VALIDATION_ERROR"
+            message:
+              type: string
+              example: "Invalid request parameters"
+
+    # User Schemas
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        username:
+          type: string
+          example: "john_doe"
+        email:
+          type: string
+          format: email
+          example: "john@example.com"
+        role:
+          type: string
+          enum: [admin, user]
+          example: "user"
+        status:
+          type: string
+          enum: [active, inactive, suspended]
+          example: "active"
+        created_at:
+          type: string
+          format: date-time
+        last_login_at:
+          type: string
+          format: date-time
+
+    RegisterRequest:
+      type: object
+      required:
+        - username
+        - email
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          example: "john_doe"
+        email:
+          type: string
+          format: email
+          example: "john@example.com"
+        password:
+          type: string
+          minLength: 8
+          example: "SecurePass123!"
+
+    LoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          example: "john_doe"
+        password:
+          type: string
+          example: "SecurePass123!"
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refresh_token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        token_type:
+          type: string
+          example: "Bearer"
+        expires_in:
+          type: integer
+          example: 900
+        user:
+          $ref: '#/components/schemas/User'
+
+    # API Key Schemas
+    APIKeyRequest:
+      type: object
+      required:
+        - api_key
+        - api_secret
+      properties:
+        api_key:
+          type: string
+          example: "ABCDEF123456"
+        api_secret:
+          type: string
+          example: "secret123456789"
+        label:
+          type: string
+          example: "My Trading Key"
+
+    APIKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        label:
+          type: string
+          example: "My Trading Key"
+        is_active:
+          type: boolean
+          example: true
+        last_used_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    # Market Data Schemas
+    Coin:
+      type: object
+      properties:
+        pair_id:
+          type: string
+          example: "btcidr"
+        base_currency:
+          type: string
+          example: "btc"
+        quote_currency:
+          type: string
+          example: "idr"
+        current_price:
+          type: number
+          format: double
+          example: 650000000
+        high_24h:
+          type: number
+          example: 655000000
+        low_24h:
+          type: number
+          example: 645000000
+        open_24h:
+          type: number
+          example: 648000000
+        volume_24h:
+          type: number
+          example: 12.5
+        volume_idr:
+          type: number
+          example: 8125000000
+        change_24h:
+          type: number
+          example: 2.5
+        best_bid:
+          type: number
+          example: 649900000
+        best_ask:
+          type: number
+          example: 650100000
+        gap_percentage:
+          type: number
+          example: 0.03
+        spread:
+          type: number
+          example: 200000
+        pump_score:
+          type: number
+          example: 75.3
+        timeframes:
+          $ref: '#/components/schemas/Timeframes'
+        last_update:
+          type: string
+          format: date-time
+
+    Timeframes:
+      type: object
+      properties:
+        1m:
+          $ref: '#/components/schemas/TimeframeData'
+        5m:
+          $ref: '#/components/schemas/TimeframeData'
+        15m:
+          $ref: '#/components/schemas/TimeframeData'
+        30m:
+          $ref: '#/components/schemas/TimeframeData'
+
+    TimeframeData:
+      type: object
+      properties:
+        open:
+          type: number
+          example: 650000000
+        high:
+          type: number
+          example: 651000000
+        low:
+          type: number
+          example: 649000000
+        trx:
+          type: integer
+          example: 45
+
+    # Copilot Schemas
+    TradeRequest:
+      type: object
+      required:
+        - pair
+        - buying_price
+        - volume_idr
+        - target_profit
+        - stop_loss
+      properties:
+        pair:
+          type: string
+          example: "btcidr"
+        buying_price:
+          type: number
+          format: double
+          example: 650000000
+        volume_idr:
+          type: number
+          format: double
+          minimum: 10000
+          example: 1000000
+        target_profit:
+          type: number
+          format: double
+          minimum: 0.1
+          maximum: 1000
+          example: 5.0
+        stop_loss:
+          type: number
+          format: double
+          minimum: 0.1
+          maximum: 100
+          example: 3.0
+        is_paper_trade:
+          type: boolean
+          default: false
+          example: false
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 123
+        user_id:
+          type: string
+          format: uuid
+        pair:
+          type: string
+          example: "btcidr"
+        status:
+          type: string
+          enum: [pending, filled, completed, cancelled, stopped]
+          example: "filled"
+        buy_price:
+          type: number
+          example: 650000000
+        buy_amount:
+          type: number
+          example: 0.00153846
+        buy_order_id:
+          type: string
+          example: "123456789"
+        sell_price:
+          type: number
+          example: 682500000
+        sell_amount:
+          type: number
+          example: 0.00153846
+        sell_order_id:
+          type: string
+          example: "123456790"
+        target_profit:
+          type: number
+          example: 5.0
+        stop_loss:
+          type: number
+          example: 3.0
+        is_paper_trade:
+          type: boolean
+          example: false
+        stop_loss_triggered:
+          type: boolean
+          example: false
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # Bot Schemas
+    BotConfigRequest:
+      type: object
+      required:
+        - name
+        - type
+        - pair
+        - is_paper_trading
+        - initial_balance_idr
+      properties:
+        name:
+          type: string
+          example: "My Market Maker"
+        type:
+          type: string
+          enum: [market_maker, pump_hunter]
+          example: "market_maker"
+        pair:
+          type: string
+          example: "btcidr"
+        is_paper_trading:
+          type: boolean
+          example: true
+        api_key_id:
+          type: integer
+          format: int64
+          nullable: true
+          example: null
+        initial_balance_idr:
+          type: number
+          minimum: 10000
+          example: 5000000
+        # Market Maker specific
+        order_size_idr:
+          type: number
+          example: 500000
+        min_gap_percent:
+          type: number
+          example: 0.5
+        reposition_threshold_percent:
+          type: number
+          example: 0.1
+        max_loss_idr:
+          type: number
+          example: 1000000
+        # Pump Hunter specific
+        entry_rules:
+          $ref: '#/components/schemas/PumpHunterEntryRules'
+        exit_rules:
+          $ref: '#/components/schemas/PumpHunterExitRules'
+        risk_management:
+          $ref: '#/components/schemas/PumpHunterRiskManagement'
+
+    PumpHunterEntryRules:
+      type: object
+      properties:
+        min_pump_score:
+          type: number
+          example: 50.0
+        min_timeframes_positive:
+          type: integer
+          example: 2
+        min_24h_volume_idr:
+          type: number
+          example: 1000000000
+        min_price_idr:
+          type: number
+          example: 100
+        excluded_pairs:
+          type: array
+          items:
+            type: string
+          example: ["usdtidr", "usdcidr"]
+        allowed_pairs:
+          type: array
+          items:
+            type: string
+          example: []
+
+    PumpHunterExitRules:
+      type: object
+      properties:
+        target_profit_percent:
+          type: number
+          example: 3.0
+        stop_loss_percent:
+          type: number
+          example: 1.5
+        trailing_stop_enabled:
+          type: boolean
+          example: true
+        trailing_stop_percent:
+          type: number
+          example: 1.0
+        max_hold_minutes:
+          type: integer
+          example: 30
+        exit_on_pump_score_drop:
+          type: boolean
+          example: true
+        pump_score_drop_threshold:
+          type: number
+          example: 20.0
+
+    PumpHunterRiskManagement:
+      type: object
+      properties:
+        max_position_idr:
+          type: number
+          example: 500000
+        max_concurrent_positions:
+          type: integer
+          example: 3
+        daily_loss_limit_idr:
+          type: number
+          example: 1000000
+        cooldown_after_loss_minutes:
+          type: integer
+          example: 10
+        min_balance_idr:
+          type: number
+          example: 100000
+
+    BotConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "My Market Maker"
+        type:
+          type: string
+          enum: [market_maker, pump_hunter]
+        pair:
+          type: string
+          example: "btcidr"
+        is_paper_trading:
+          type: boolean
+        status:
+          type: string
+          enum: [stopped, starting, running, error]
+          example: "running"
+        total_trades:
+          type: integer
+          example: 45
+        winning_trades:
+          type: integer
+          example: 32
+        total_profit_idr:
+          type: number
+          example: 2500000
+        balances:
+          type: object
+          additionalProperties:
+            type: number
+          example:
+            idr: 4750000
+            btc: 0.05
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Position:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        bot_id:
+          type: integer
+          format: int64
+        pair:
+          type: string
+          example: "ethidr"
+        status:
+          type: string
+          enum: [open, closed]
+        entry_price:
+          type: number
+          example: 45000000
+        entry_amount:
+          type: number
+          example: 0.02
+        exit_price:
+          type: number
+          nullable: true
+          example: 46350000
+        exit_amount:
+          type: number
+          nullable: true
+        profit_idr:
+          type: number
+          example: 27000
+        profit_percent:
+          type: number
+          example: 3.0
+        created_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+paths:
+  # Health Endpoints
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Basic health check
+      description: Returns OK if the server is running
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "OK"
+
+  /api/v1/ping:
+    get:
+      tags:
+        - Health
+      summary: API ping
+      responses:
+        '200':
+          description: Pong
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/health:
+    get:
+      tags:
+        - Health
+      summary: Detailed health check
+      description: Returns detailed health information including dependencies
+      responses:
+        '200':
+          description: Detailed health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  redis:
+                    type: string
+                    example: "connected"
+                  websocket:
+                    type: string
+                    example: "active"
+
+  # Authentication Endpoints
+  /api/v1/auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Register new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: User login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Refresh access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          access_token:
+                            type: string
+                          expires_in:
+                            type: integer
+
+  /api/v1/auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: Logout user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/auth/me:
+    get:
+      tags:
+        - Authentication
+      summary: Get current user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user information
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+  # User Management Endpoints (Admin)
+  /api/v1/users:
+    get:
+      tags:
+        - Users
+      summary: List all users (Admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          users:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/User'
+                          total:
+                            type: integer
+                          page:
+                            type: integer
+                          limit:
+                            type: integer
+
+    post:
+      tags:
+        - Users
+      summary: Create user (Admin only)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+  /api/v1/users/profile:
+    get:
+      tags:
+        - Users
+      summary: Get user profile
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+    put:
+      tags:
+        - Users
+      summary: Update user profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/users/password:
+    post:
+      tags:
+        - Users
+      summary: Change password
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - old_password
+                - new_password
+              properties:
+                old_password:
+                  type: string
+                new_password:
+                  type: string
+                  minLength: 8
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/users/{id}:
+    get:
+      tags:
+        - Users
+      summary: Get user by ID (Admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+    put:
+      tags:
+        - Users
+      summary: Update user (Admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                role:
+                  type: string
+                  enum: [admin, user]
+                status:
+                  type: string
+                  enum: [active, inactive, suspended]
+      responses:
+        '200':
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+    delete:
+      tags:
+        - Users
+      summary: Delete user (Admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/users/{id}/reset-password:
+    post:
+      tags:
+        - Users
+      summary: Reset user password (Admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - new_password
+              properties:
+                new_password:
+                  type: string
+                  minLength: 8
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # API Key Management
+  /api/v1/api-keys:
+    post:
+      tags:
+        - API Keys
+      summary: Create and validate API key
+      description: Stores encrypted Indodax API key and validates it
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/APIKeyRequest'
+      responses:
+        '201':
+          description: API key created and validated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/APIKey'
+
+    get:
+      tags:
+        - API Keys
+      summary: Get API key status
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: API key information (encrypted values not returned)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/APIKey'
+
+    delete:
+      tags:
+        - API Keys
+      summary: Delete API key
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: API key deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/api-keys/validate:
+    post:
+      tags:
+        - API Keys
+      summary: Validate API key with Indodax
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: API key is valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/api-keys/account-info:
+    get:
+      tags:
+        - API Keys
+      summary: Get Indodax account info
+      description: Fetches balance and account information from Indodax
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Account information
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          balance:
+                            type: object
+                            additionalProperties:
+                              type: string
+                          balance_hold:
+                            type: object
+                            additionalProperties:
+                              type: string
+
+  # Market Data Endpoints
+  /api/v1/market/summary:
+    get:
+      tags:
+        - Market Data
+      summary: Get all market summaries
+      description: Returns market data for all trading pairs sorted by pump score
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: min_volume
+          in: query
+          schema:
+            type: number
+            default: 0
+      responses:
+        '200':
+          description: Market summaries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          markets:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Coin'
+                          count:
+                            type: integer
+                          last_update:
+                            type: string
+                            format: date-time
+
+  /api/v1/market/pump-scores:
+    get:
+      tags:
+        - Market Data
+      summary: Get top pump scores
+      description: Returns markets sorted by pump score (highest first)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: min_volume
+          in: query
+          schema:
+            type: number
+            default: 1000000
+      responses:
+        '200':
+          description: Top pump scores
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          scores:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Coin'
+                          count:
+                            type: integer
+
+  /api/v1/market/gaps:
+    get:
+      tags:
+        - Market Data
+      summary: Get top gaps
+      description: Returns markets sorted by bid-ask gap percentage
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: min_volume
+          in: query
+          schema:
+            type: number
+            default: 10000000
+      responses:
+        '200':
+          description: Top gaps
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          gaps:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Coin'
+                          count:
+                            type: integer
+
+  /api/v1/market/{pair}:
+    get:
+      tags:
+        - Market Data
+      summary: Get pair detail
+      description: Returns detailed market data for a specific trading pair
+      parameters:
+        - name: pair
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "btcidr"
+      responses:
+        '200':
+          description: Pair details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Coin'
+        '404':
+          description: Pair not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/market/sync:
+    post:
+      tags:
+        - Market Data
+      summary: Sync metadata (Admin only)
+      description: Manually triggers metadata refresh from Indodax
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Metadata synced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Copilot Trading Endpoints
+  /api/v1/copilot/trade:
+    post:
+      tags:
+        - Copilot
+      summary: Place a copilot trade
+      description: |
+        Places a buy order with automated sell strategy.
+        - Supports both paper trading and live trading
+        - Automatically places sell order when buy fills
+        - Monitors stop-loss conditions
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TradeRequest'
+      responses:
+        '201':
+          description: Trade created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Trade'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/copilot/trades:
+    get:
+      tags:
+        - Copilot
+      summary: List copilot trades
+      description: Returns all trades for the current user
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, filled, completed, cancelled, stopped]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          trades:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Trade'
+                          count:
+                            type: integer
+
+  /api/v1/copilot/trades/{id}:
+    get:
+      tags:
+        - Copilot
+      summary: Get trade details
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Trade details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Trade'
+        '404':
+          description: Trade not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - Copilot
+      summary: Cancel pending trade
+      description: Cancels the buy order if trade is still pending
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Trade cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/copilot/trades/{id}/sell:
+    post:
+      tags:
+        - Copilot
+      summary: Manual sell
+      description: |
+        Manually triggers a sell order for a filled trade.
+        - Cancels auto-sell order if exists
+        - Places market sell order immediately
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Sell order placed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Bot Management Endpoints
+  /api/v1/bots:
+    post:
+      tags:
+        - Bots
+      summary: Create bot
+      description: Creates a new Market Maker or Pump Hunter bot
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotConfigRequest'
+      responses:
+        '201':
+          description: Bot created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotConfig'
+
+    get:
+      tags:
+        - Bots
+      summary: List user's bots
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [market_maker, pump_hunter]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [stopped, starting, running, error]
+      responses:
+        '200':
+          description: List of bots
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          bots:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotConfig'
+                          count:
+                            type: integer
+
+  /api/v1/bots/{id}:
+    get:
+      tags:
+        - Bots
+      summary: Get bot details
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Bot details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotConfig'
+
+    put:
+      tags:
+        - Bots
+      summary: Update bot configuration
+      description: Updates bot settings (bot must be stopped)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotConfigRequest'
+      responses:
+        '200':
+          description: Bot updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+    delete:
+      tags:
+        - Bots
+      summary: Delete bot
+      description: Deletes a bot (must be stopped first)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Bot deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/bots/{id}/summary:
+    get:
+      tags:
+        - Bots
+      summary: Get bot P&L summary
+      description: Returns profit/loss summary and statistics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Bot summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          total_trades:
+                            type: integer
+                          winning_trades:
+                            type: integer
+                          losing_trades:
+                            type: integer
+                          win_rate:
+                            type: number
+                          total_profit_idr:
+                            type: number
+                          average_profit:
+                            type: number
+                          largest_win:
+                            type: number
+                          largest_loss:
+                            type: number
+
+  /api/v1/bots/{id}/start:
+    post:
+      tags:
+        - Bots
+      summary: Start bot
+      description: Starts a stopped bot
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/bots/{id}/stop:
+    post:
+      tags:
+        - Bots
+      summary: Stop bot
+      description: Stops a running bot
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/v1/bots/{id}/positions:
+    get:
+      tags:
+        - Bots
+      summary: List bot positions
+      description: Returns positions for Pump Hunter bot
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, closed]
+      responses:
+        '200':
+          description: List of positions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          positions:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Position'
+                          count:
+                            type: integer
+
+  # WebSocket Endpoint
+  /api/v1/ws:
+    get:
+      tags:
+        - WebSocket
+      summary: WebSocket connection
+      description: |
+        Establishes WebSocket connection for real-time updates.
+
+        **Authentication:** Pass JWT token as query parameter `?token=<jwt>`
+
+        **Message Types:**
+        - `market_update`: Market data updates
+        - `pump_signal`: High pump score alerts
+        - `order_update`: Order status changes
+        - `bot_status`: Bot state changes
+        - `stop_loss_triggered`: Stop-loss alerts
+        - `position_update`: Position changes
+
+        **Example:**
+        ```javascript
+        const ws = new WebSocket('ws://localhost:8080/api/v1/ws?token=<jwt>');
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          console.log(data.type, data.payload);
+        };
+        ```
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: JWT access token
+      responses:
+        '101':
+          description: Switching Protocols (WebSocket connection established)
+        '401':
+          description: Unauthorized (invalid token)

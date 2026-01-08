@@ -24,7 +24,7 @@ func NewUserHandler(userService *service.UserService) *UserHandler {
 // GET /api/v1/users/profile
 func (h *UserHandler) GetProfile(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	
+
 	user, err := h.userService.GetProfile(c.Request.Context(), userID.(string))
 	if err != nil {
 		util.SendError(c, err)
@@ -38,7 +38,7 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 // PUT /api/v1/users/profile
 func (h *UserHandler) UpdateProfile(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	
+
 	var req struct {
 		Email string `json:"email" binding:"omitempty,email"`
 	}
@@ -60,7 +60,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 // POST /api/v1/users/password
 func (h *UserHandler) ChangePassword(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	
+
 	var req model.ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		util.SendValidationError(c, err.Error())
@@ -94,7 +94,7 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 // GET /api/v1/users/:id
 func (h *UserHandler) GetUser(c *gin.Context) {
 	userID := c.Param("id")
-	
+
 	user, err := h.userService.GetUser(c.Request.Context(), userID)
 	if err != nil {
 		util.SendError(c, err)
@@ -132,7 +132,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 // PUT /api/v1/users/:id
 func (h *UserHandler) UpdateUser(c *gin.Context) {
 	userID := c.Param("id")
-	
+
 	var req model.UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		util.SendValidationError(c, err.Error())
@@ -152,7 +152,7 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 // DELETE /api/v1/users/:id
 func (h *UserHandler) DeleteUser(c *gin.Context) {
 	userID := c.Param("id")
-	
+
 	// Prevent self-deletion
 	currentUserID, _ := c.Get("user_id")
 	if userID == currentUserID.(string) {
@@ -172,7 +172,7 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 // POST /api/v1/users/:id/reset-password
 func (h *UserHandler) ResetPassword(c *gin.Context) {
 	userID := c.Param("id")
-	
+
 	var req struct {
 		NewPassword string `json:"new_password" binding:"required,min=8,max=100"`
 	}
@@ -189,3 +189,16 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 	util.SendSuccessWithMessage(c, nil, "Password reset successfully")
 }
 
+// GetStats returns aggregated user statistics
+// GET /api/v1/users/stats
+func (h *UserHandler) GetStats(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+
+	stats, err := h.userService.GetStats(c.Request.Context(), userID.(string))
+	if err != nil {
+		util.SendError(c, err)
+		return
+	}
+
+	util.SendSuccess(c, stats)
+}

@@ -4,16 +4,16 @@ import "time"
 
 // User represents a user in the system
 type User struct {
-	ID             string    `json:"id"`
-	Username       string    `json:"username"`
-	Email          string    `json:"email"`
-	PasswordHash   string    `json:"-"` // Never expose password hash
-	Role           string    `json:"role"` // "admin" or "user"
-	Status         string    `json:"status"` // "active" or "inactive"
-	HasAPIKey      bool      `json:"has_api_key"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	LastLoginAt    *time.Time `json:"last_login_at,omitempty"`
+	ID           string     `json:"id"`
+	Username     string     `json:"username"`
+	Email        string     `json:"email"`
+	PasswordHash string     `json:"password_hash"` // Stored in Redis, but excluded from SafeUser responses
+	Role         string     `json:"role"`          // "admin" or "user"
+	Status       string     `json:"status"`        // "active" or "inactive"
+	HasAPIKey    bool       `json:"has_api_key"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
 }
 
 // UserRole constants
@@ -115,3 +115,13 @@ type Session struct {
 	IP           string    `json:"ip"`
 }
 
+// UserStats represents aggregated user statistics
+type UserStats struct {
+	ActiveBots        int     `json:"active_bots"`
+	TotalProfitIDR    float64 `json:"total_profit_idr"`
+	AvgWinRate        float64 `json:"avg_win_rate"`
+	TotalTrades       int     `json:"total_trades"`
+	RealIDRBalance    float64 `json:"real_idr_balance"`
+	TotalAllocatedIDR float64 `json:"total_allocated_idr"`
+	TotalPaperBalance float64 `json:"total_paper_balance"`
+}

@@ -1,0 +1,8 @@
+.git
+.env
+tuyul-app
+node_modules
+dist
+*.log
+bin
+obj

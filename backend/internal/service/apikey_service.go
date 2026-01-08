@@ -13,10 +13,11 @@ import (
 
 // APIKeyService handles API key operations
 type APIKeyService struct {
-	apiKeyRepo   *repository.APIKeyRepository
-	userRepo     *repository.UserRepository
-	indodaxClient *indodax.Client
-	encryptionKey string
+	apiKeyRepo          *repository.APIKeyRepository
+	userRepo            *repository.UserRepository
+	indodaxClient       *indodax.Client
+	notificationService *NotificationService
+	encryptionKey       string
 }
 
 // NewAPIKeyService creates a new API key service
@@ -24,13 +25,15 @@ func NewAPIKeyService(
 	apiKeyRepo *repository.APIKeyRepository,
 	userRepo *repository.UserRepository,
 	indodaxClient *indodax.Client,
+	notificationService *NotificationService,
 	encryptionKey string,
 ) *APIKeyService {
 	return &APIKeyService{
-		apiKeyRepo:    apiKeyRepo,
-		userRepo:      userRepo,
-		indodaxClient: indodaxClient,
-		encryptionKey: encryptionKey,
+		apiKeyRepo:          apiKeyRepo,
+		userRepo:            userRepo,
+		indodaxClient:       indodaxClient,
+		notificationService: notificationService,
+		encryptionKey:       encryptionKey,
 	}
 }
 
@@ -39,12 +42,12 @@ func (s *APIKeyService) Create(ctx context.Context, userID string, req *model.AP
 	// Validate API key with Indodax
 	isValid, err := s.indodaxClient.ValidateAPIKey(req.Key, req.Secret)
 	if err != nil {
-		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI, 
+		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI,
 			"Failed to validate API key", err.Error())
 	}
 
 	if !isValid {
-		return nil, util.NewAppError(400, util.ErrCodeAPIKeyInvalid, 
+		return nil, util.NewAppError(400, util.ErrCodeAPIKeyInvalid,
 			"Invalid API key or secret. Please check your credentials from Indodax.")
 	}
 
@@ -172,7 +175,7 @@ func (s *APIKeyService) ValidateAndUpdate(ctx context.Context, userID string) (*
 	// Validate with Indodax
 	isValid, err := s.indodaxClient.ValidateAPIKey(key, secret)
 	if err != nil {
-		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI, 
+		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI,
 			"Failed to validate API key", err.Error())
 	}
 
@@ -198,12 +201,16 @@ func (s *APIKeyService) GetAccountInfo(ctx context.Context, userID string) (*ind
 	}
 
 	// Get account info from Indodax
-	info, err := s.indodaxClient.GetInfo(credentials.Key, credentials.Secret)
+	info, err := s.indodaxClient.GetInfo(ctx, credentials.Key, credentials.Secret)
 	if err != nil {
-		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI, 
+		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI,
 			"Failed to get account info", err.Error())
 	}
 
+	// Notify via WebSocket
+	s.notificationService.NotifyUser(ctx, userID, model.MessageTypeBalanceUpdate, info.Balance)
+
 	return info, nil
 }
+
 

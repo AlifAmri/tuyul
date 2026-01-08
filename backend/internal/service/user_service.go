@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"tuyul/backend/internal/model"
@@ -14,13 +15,19 @@ import (
 
 // UserService handles user management operations
 type UserService struct {
-	userRepo *repository.UserRepository
+	userRepo   *repository.UserRepository
+	botRepo    *repository.BotRepository
+	tradeRepo  *repository.TradeRepository
+	apiService *APIKeyService
 }
 
 // NewUserService creates a new user service
-func NewUserService(userRepo *repository.UserRepository) *UserService {
+func NewUserService(userRepo *repository.UserRepository, botRepo *repository.BotRepository, tradeRepo *repository.TradeRepository, apiService *APIKeyService) *UserService {
 	return &UserService{
-		userRepo: userRepo,
+		userRepo:   userRepo,
+		botRepo:    botRepo,
+		tradeRepo:  tradeRepo,
+		apiService: apiService,
 	}
 }
 
@@ -246,3 +253,59 @@ func (s *UserService) ResetPassword(ctx context.Context, userID, newPassword str
 	return nil
 }
 
+// GetStats returns aggregated user statistics
+func (s *UserService) GetStats(ctx context.Context, userID string) (*model.UserStats, error) {
+	// 1. Get all bots for user
+	bots, err := s.botRepo.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, util.ErrInternalServer("Failed to fetch user bots")
+	}
+
+	stats := &model.UserStats{}
+	var totalWinningTrades int
+
+	for _, bot := range bots {
+		if bot.Status == model.BotStatusRunning {
+			stats.ActiveBots++
+		}
+		stats.TotalProfitIDR += bot.TotalProfitIDR
+		stats.TotalTrades += bot.TotalTrades
+		totalWinningTrades += bot.WinningTrades
+
+		// Aggregate virtual balances
+		if bot.IsPaperTrading {
+			stats.TotalPaperBalance += bot.Balances["idr"]
+		} else {
+			stats.TotalAllocatedIDR += bot.InitialBalanceIDR
+		}
+	}
+
+	// 2. Get all copilot trades
+	trades, _, err := s.tradeRepo.ListByUser(ctx, userID, 0, 1000)
+	if err == nil {
+		for _, trade := range trades {
+			if trade.Status == model.TradeStatusCompleted || trade.Status == model.TradeStatusStopped {
+				stats.TotalProfitIDR += trade.ProfitIDR
+				stats.TotalTrades++
+				if trade.ProfitIDR > 0 {
+					totalWinningTrades++
+				}
+			}
+		}
+	}
+
+	// 3. Get Real IDR Balance if API Key exists
+	if s.apiService != nil {
+		info, err := s.apiService.GetAccountInfo(ctx, userID)
+		if err == nil && info != nil {
+			stats.RealIDRBalance, _ = strconv.ParseFloat(info.Balance["idr"], 64)
+		}
+	}
+
+	// Calculate average win rate
+	if stats.TotalTrades > 0 {
+		stats.AvgWinRate = float64(totalWinningTrades) / float64(stats.TotalTrades) * 100
+	}
+
+	return stats, nil
+}
