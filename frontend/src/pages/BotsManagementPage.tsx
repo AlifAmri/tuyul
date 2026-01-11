@@ -4,21 +4,21 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { botService } from '@/api/services/bot';
 import { useAuthStore } from '@/stores/authStore';
 import { useMarketStore } from '@/stores/marketStore';
-import { BotConfig, BotType, BotConfigRequest, Order, Position, BotSummary } from '@/types/bot';
+import { BotConfig, BotType, BotConfigRequest, Order, Position } from '@/types/bot';
 import { formatIDR, formatNumber, formatPercent } from '@/utils/formatters';
 import { cn } from '@/utils/cn';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { NoBotsEmptyState } from '@/components/common/EmptyState';
 import { AlertModal } from '@/components/common/AlertModal';
 import { useWebSocket } from '@/contexts/WebSocketContext';
-import { WebSocketMessage, PositionUpdateMessage, PositionOpenMessage, PositionCloseMessage } from '@/types/websocket';
+import { WebSocketMessage, PositionOpenMessage, PositionCloseMessage } from '@/types/websocket';
 import { AxiosError } from 'axios';
 
 export default function BotsManagementPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { lastMessage } = useWebSocket();
-  const { getCoin, coins: marketCoins } = useMarketStore();
+  const { getCoin } = useMarketStore();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedBot, setSelectedBot] = useState<BotConfig | null>(null);
   const [showCreateWizard, setShowCreateWizard] = useState(false);
@@ -347,6 +347,7 @@ export default function BotsManagementPage() {
     // Build submit data based on bot type
     if (formData.type === 'pump_hunter') {
       // Pump Hunter: send entry_rules, exit_rules, risk_management, and initial_balance_idr
+      // Note: Market Maker fields are required by API but not used for Pump Hunter
       const submitData: BotConfigRequest = {
         name: formData.name,
         type: 'pump_hunter',
@@ -354,6 +355,10 @@ export default function BotsManagementPage() {
         is_paper_trading: formData.is_paper_trading,
         api_key_id: formData.api_key_id,
         initial_balance_idr: formData.initial_balance_idr,
+        order_size_idr: 0, // Not used for Pump Hunter, but required by API
+        min_gap_percent: 0, // Not used for Pump Hunter, but required by API
+        reposition_threshold_percent: 0, // Not used for Pump Hunter, but required by API
+        max_loss_idr: 0, // Not used for Pump Hunter, but required by API
         entry_rules: formData.entry_rules,
         exit_rules: formData.exit_rules,
         risk_management: formData.risk_management,

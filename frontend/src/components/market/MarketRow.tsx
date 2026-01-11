@@ -13,10 +13,9 @@ interface MarketRowProps {
   onSelect: (coin: Coin) => void;
   onNavigate: (path: string) => void;
   calculateChange: (coin: Coin, timeframe: '1m' | '5m' | '15m' | '30m') => number;
-  getPumpScoreColor: (score: number) => string;
 }
 
-export const MarketRow = memo(({ coin, activeTab, priceChange, onSelect, onNavigate, calculateChange, getPumpScoreColor }: MarketRowProps) => {
+export const MarketRow = memo(({ coin, activeTab, priceChange, onSelect, onNavigate, calculateChange }: MarketRowProps) => {
   const change1m = useMemo(() => calculateChange(coin, '1m'), [coin, calculateChange]);
   const change5m = useMemo(() => calculateChange(coin, '5m'), [coin, calculateChange]);
   const change15m = useMemo(() => calculateChange(coin, '15m'), [coin, calculateChange]);

@@ -12,7 +12,6 @@ interface MarketTableProps {
   priceChanges: Record<string, 'up' | 'down' | null>;
   onSelectPair: (coin: Coin) => void;
   calculateChange: (coin: Coin, timeframe: '1m' | '5m' | '15m' | '30m') => number;
-  getPumpScoreColor: (score: number) => string;
 }
 
 export const MarketTable = memo(({ 
@@ -20,8 +19,7 @@ export const MarketTable = memo(({
   activeTab, 
   priceChanges, 
   onSelectPair,
-  calculateChange,
-  getPumpScoreColor 
+  calculateChange
 }: MarketTableProps) => {
   const navigate = useNavigate();
 
@@ -102,7 +100,6 @@ export const MarketTable = memo(({
                     onSelect={onSelectPair}
                     onNavigate={navigate}
                     calculateChange={calculateChange}
-                    getPumpScoreColor={getPumpScoreColor}
                   />
                 ))
               )}

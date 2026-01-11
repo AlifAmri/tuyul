@@ -211,7 +211,7 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
           // Ignore errors during cleanup (e.g., already closed)
           // This can happen in React StrictMode when unmounting during connection
           // Suppress this error in development as it's expected behavior
-          if (process.env.NODE_ENV === 'development') {
+          if (import.meta.env.MODE === 'development') {
             // Silently ignore in dev mode (React StrictMode)
           } else {
             console.warn('[WebSocket] Error during disconnect cleanup:', error);

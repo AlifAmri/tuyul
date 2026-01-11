@@ -72,12 +72,6 @@ export default function PumpScoresPage() {
     return ((coin.current_price - tfData.open) / tfData.open) * 100;
   }, []);
 
-  const getPumpScoreColor = useCallback((score: number) => {
-    if (score >= 100) return 'text-red-500';
-    if (score >= 50) return 'text-orange-500';
-    if (score >= 20) return 'text-yellow-500';
-    return 'text-gray-400';
-  }, []);
 
   // Merge and sort data by pump score
   const mergeAndSortMarketData = useCallback((apiData: Coin[] | undefined): Coin[] => {
@@ -152,7 +146,6 @@ export default function PumpScoresPage() {
             priceChanges={priceChanges}
             onSelectPair={handleSelectPair}
             calculateChange={calculateChange}
-            getPumpScoreColor={getPumpScoreColor}
           />
         )}
 
@@ -162,7 +155,6 @@ export default function PumpScoresPage() {
             pair={selectedPair}
             onClose={() => setSelectedPair(null)}
             calculateChange={calculateChange}
-            getPumpScoreColor={getPumpScoreColor}
           />
         )}
       </div>

@@ -1,0 +1,130 @@
+# Kubernetes namespace
+namespace: playground
+
+replicaCount: 1
+
+image:
+  # Docker Hub image: enivent/indodax-watcher-api:latest
+  repository: enivent/indodax-watcher-api
+  pullPolicy: Always
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: "kong"
+  annotations:
+    # Kong Ingress Controller annotations
+    # Note: http/https automatically support WebSocket upgrades (no need for ws/wss)
+    konghq.com/protocols: "http,https"
+    # Enable WebSocket support explicitly
+    konghq.com/plugins: "{{ include \"api.fullname\" . }}-cors"
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "true"
+    # Optional: Add Kong plugins (comma-separated)
+    # Note: CORS is handled by the application, but we can enable Kong CORS plugin if needed
+    # konghq.com/plugins: "rate-limiting"
+    # SSL/TLS Configuration
+    # For cert-manager (automatic Let's Encrypt):
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Or use cert-manager.io/issuer for namespaced issuer
+    # cert-manager.io/issuer: "letsencrypt-prod"
+  hosts:
+    - host: idax.envio.co.id
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    # Option 1: Use cert-manager (automatic certificate)
+    - secretName: indodax-watcher-api-tls
+      hosts:
+        - idax.envio.co.id
+    # Option 2: Manual certificate (uncomment and provide secret)
+    # - secretName: indodax-watcher-api-tls-manual
+    #   hosts:
+    #     - idax.envio.co.id
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Database configuration
+database:
+  # Use DATABASE_URL connection string (recommended)
+  url: ""
+  # Or use individual connection parameters
+  host: ""
+  port: "5432"
+  user: "postgres"
+  password: ""
+  dbName: "ix_screener"
+  sslMode: "disable"
+
+# Indodax API configuration
+indodax:
+  restUrl: "https://indodax.com"
+  wsUrl: "wss://ws3.indodax.com/ws/"
+  staticToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE5NDY2MTg0MTV9.UR1lBM6Eqh0yWz-PVirw1uPCxe60FdchR8eNVdsskeo"
+
+# Server configuration
+server:
+  port: "8080"
+
+# Environment variables (will be set as env vars in the pod)
+env:
+  - name: JWT_SECRET
+    value: "M123uuywebdy1231"
+  - name: JWT_ACCESS_EXPIRY
+    value: "15m"  # Default: 15 minutes, can be overridden via --set env[1].value="3600h"
+  - name: JWT_REFRESH_EXPIRY
+    value: "168h"  # Default: 7 days (168 hours), can be overridden via --set env[2].value="3600h"
+  - name: API_KEY_ENCRYPTION_KEY
+    value: ""  # Required: Set via --set env[3].value="your-key" or use secrets
+
+# Secrets (will be created as Kubernetes secrets)
+secrets: {}
+  # databasePassword: ""
+  # indodaxToken: ""
+

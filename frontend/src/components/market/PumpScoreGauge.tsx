@@ -17,18 +17,7 @@ export const PumpScoreGauge = memo(({
   className,
   showValue = false 
 }: PumpScoreGaugeProps) => {
-  // Clamp score to -30 to 500 range
-  const clampedScore = Math.max(MIN_SCORE, Math.min(maxScore, score));
-  
-  // Normalize score: -30 (maps to -1) to 500 (maps to +1)
-  // Score 0: maps to approximately -0.057 (between -1 and 0)
-  const normalizedScore = clampedScore < MIN_SCORE 
-    ? -1 
-    : (clampedScore - MIN_SCORE) / (maxScore - MIN_SCORE) * 2 - 1;
-  
   const NUM_SEGMENTS = 21; // 21 bars total
-  // Always fill all segments
-  const filledSegments = NUM_SEGMENTS;
 
   // Calculate gradient color for negative scores
   // Bars 1-10 (index 1 to 10) change based on score
@@ -37,6 +26,8 @@ export const PumpScoreGauge = memo(({
   // Score 0: Bars 1-10 show balanced gradient
   // Score -30: Bars 1-10 all red
   const getGradientColor = (segmentIndex: number): string => {
+    // Clamp score to valid range using maxScore
+    const clampedScore = Math.max(MIN_SCORE, Math.min(maxScore, score));
     // Get base color (bc) for a bar at score 0
     const getBaseColor = (barIndex: number) => {
       const positionInFull = barIndex / 20; // 0 to 1
@@ -47,13 +38,13 @@ export const PumpScoreGauge = memo(({
     };
     
     // For negative scores: complex gradient system
-    if (score < 0) {
+    if (clampedScore < 0) {
       // Bar 20 (last): Always red for negative scores
       if (segmentIndex === NUM_SEGMENTS - 1) {
         return 'rgb(220, 38, 38)'; // Solid red (#dc2626)
       }
       // If score < -30, all bars 0-20 are red
-      if (score < MIN_SCORE) {
+      if (clampedScore < MIN_SCORE) {
         if (segmentIndex >= 0 && segmentIndex <= 20) {
           return 'rgb(220, 38, 38)'; // Full red
         }
@@ -63,15 +54,15 @@ export const PumpScoreGauge = memo(({
       let bar0BaseIndex: number;
       let gradientStartIndex: number;
       
-      if (score >= -10 && score < 0) {
+      if (clampedScore >= -10 && clampedScore < 0) {
         // -1 to -10: Bar 0 uses bc-4, gradient bc-5 to bc-11
         bar0BaseIndex = 4;
         gradientStartIndex = 5;
-      } else if (score >= -20 && score < -10) {
+      } else if (clampedScore >= -20 && clampedScore < -10) {
         // -11 to -20: Bar 0 uses bc-7, gradient bc-8 to bc-11
         bar0BaseIndex = 7;
         gradientStartIndex = 8;
-      } else if (score >= MIN_SCORE && score < -20) {
+      } else if (clampedScore >= MIN_SCORE && clampedScore < -20) {
         // -20 to -30: Bar 0 uses bc-10, gradient bc-10 to bc-11
         bar0BaseIndex = 10;
         gradientStartIndex = 10;
@@ -115,34 +106,34 @@ export const PumpScoreGauge = memo(({
     }
     
     // For positive scores: Multiple ranges with different bc values for bar 20
-    if (score >= 0) {
+    if (clampedScore >= 0) {
       // > 16000: All green for all bars
-      if (score > 16000) {
+      if (clampedScore > 16000) {
         return 'rgb(34, 197, 94)'; // Solid green (#22c55e)
       }
       
       // Determine which bc value to use for bar 20 based on score range
       let bar20BaseIndex: number;
       
-      if (score >= 8000) {
+      if (clampedScore >= 8000) {
         // 8000 - 16000: Bar 20 uses bc-8
         bar20BaseIndex = 8;
-      } else if (score >= 4000) {
+      } else if (clampedScore >= 4000) {
         // 4000 - 8000: Bar 20 uses bc-9 (as specified, ignoring duplicate 2000-4000 bc-10)
         bar20BaseIndex = 9;
-      } else if (score >= 2000) {
+      } else if (clampedScore >= 2000) {
         // 2000 - 4000: Bar 20 uses bc-11
         bar20BaseIndex = 11;
-      } else if (score >= 1000) {
+      } else if (clampedScore >= 1000) {
         // 1000 - 2000: Bar 20 uses bc-12
         bar20BaseIndex = 12;
-      } else if (score >= 500) {
+      } else if (clampedScore >= 500) {
         // 500 - 1000: Bar 20 uses bc-13
         bar20BaseIndex = 13;
-      } else if (score >= 300) {
+      } else if (clampedScore >= 300) {
         // 300 - 500: Bar 20 uses bc-14
         bar20BaseIndex = 14;
-      } else if (score >= 50) {
+      } else if (clampedScore >= 50) {
         // 50 - 300: Bar 20 uses bc-15
         bar20BaseIndex = 15;
       } else {
@@ -174,6 +165,9 @@ export const PumpScoreGauge = memo(({
       
       return `rgb(${Math.min(255, Math.max(0, r))}, ${Math.min(255, Math.max(0, g))}, ${Math.max(0, b)})`;
     }
+    
+    // Fallback (should never reach here, but TypeScript requires it)
+    return 'rgb(128, 128, 128)';
   };
 
   return (

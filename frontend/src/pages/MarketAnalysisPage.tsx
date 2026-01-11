@@ -141,12 +141,6 @@ export default function MarketAnalysisPage() {
     return ((coin.current_price - tfData.open) / tfData.open) * 100;
   }, []);
 
-  const getPumpScoreColor = useCallback((score: number) => {
-    if (score >= 100) return 'text-red-500';
-    if (score >= 50) return 'text-orange-500';
-    if (score >= 20) return 'text-yellow-500';
-    return 'text-gray-400';
-  }, []);
 
   // Memoize merge and sort function
   const mergeAndSortMarketData = useCallback((apiData: Coin[] | undefined, sortBy: 'change_24h' | 'pump_score' | 'gap_percentage'): Coin[] => {
@@ -372,7 +366,6 @@ export default function MarketAnalysisPage() {
                           onSelect={handleSelectPair}
                           onNavigate={navigate}
                           calculateChange={calculateChange}
-                          getPumpScoreColor={getPumpScoreColor}
                         />
                       ))
                     )}
@@ -389,7 +382,6 @@ export default function MarketAnalysisPage() {
             pair={selectedPair}
             onClose={() => setSelectedPair(null)}
             calculateChange={calculateChange}
-            getPumpScoreColor={getPumpScoreColor}
           />
         )}
       </div>
@@ -405,10 +397,9 @@ interface MarketRowProps {
   onSelect: (coin: Coin) => void;
   onNavigate: (path: string) => void;
   calculateChange: (coin: Coin, timeframe: '1m' | '5m' | '15m' | '30m') => number;
-  getPumpScoreColor: (score: number) => string;
 }
 
-const MarketRow = memo(({ coin, activeTab, priceChange, onSelect, onNavigate, calculateChange, getPumpScoreColor }: MarketRowProps) => {
+const MarketRow = memo(({ coin, activeTab, priceChange, onSelect, onNavigate, calculateChange }: MarketRowProps) => {
   const change1m = useMemo(() => calculateChange(coin, '1m'), [coin, calculateChange]);
   const change5m = useMemo(() => calculateChange(coin, '5m'), [coin, calculateChange]);
   const change15m = useMemo(() => calculateChange(coin, '15m'), [coin, calculateChange]);
@@ -514,7 +505,7 @@ const MarketRow = memo(({ coin, activeTab, priceChange, onSelect, onNavigate, ca
         <p className="text-gray-300">{formatIDR(coin.volume_idr)}</p>
       </td>
       <td className="px-6 py-4 text-right">
-        <span className={cn('font-bold', getPumpScoreColor(coin.pump_score))}>
+        <span className="font-bold text-white">
           {coin.pump_score.toFixed(1)}
         </span>
       </td>
@@ -552,10 +543,9 @@ interface PairDetailModalProps {
   pair: Coin;
   onClose: () => void;
   calculateChange: (coin: Coin, timeframe: '1m' | '5m' | '15m' | '30m') => number;
-  getPumpScoreColor: (score: number) => string;
 }
 
-const PairDetailModal = memo(({ pair, onClose, calculateChange, getPumpScoreColor }: PairDetailModalProps) => {
+const PairDetailModal = memo(({ pair, onClose, calculateChange }: PairDetailModalProps) => {
   return (
     <div
       className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
@@ -649,7 +639,7 @@ const PairDetailModal = memo(({ pair, onClose, calculateChange, getPumpScoreColo
           <div className="grid grid-cols-3 gap-4">
             <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
               <p className="text-gray-400 text-sm mb-1">Pump Score</p>
-              <p className={cn('text-xl font-bold', getPumpScoreColor(pair.pump_score))}>
+              <p className="text-xl font-bold text-white">
                 {pair.pump_score.toFixed(1)}
               </p>
             </div>

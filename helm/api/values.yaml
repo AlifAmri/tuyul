@@ -1,0 +1,145 @@
+# Kubernetes namespace
+namespace: playground
+
+replicaCount: 1
+
+image:
+  # Docker Hub image: enivent/tuyul:latest
+  repository: enivent/tuyul
+  pullPolicy: Always
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: "kong"
+  annotations:
+    # Kong Ingress Controller annotations
+    # Note: http/https automatically support WebSocket upgrades (no need for ws/wss)
+    konghq.com/protocols: "http,https"
+    # Enable WebSocket support explicitly
+    konghq.com/plugins: "{{ include \"api.fullname\" . }}-cors"
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "true"
+    # Optional: Add Kong plugins (comma-separated)
+    # Note: CORS is handled by the application, but we can enable Kong CORS plugin if needed
+    # konghq.com/plugins: "rate-limiting"
+    # SSL/TLS Configuration
+    # For cert-manager (automatic Let's Encrypt):
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Or use cert-manager.io/issuer for namespaced issuer
+    # cert-manager.io/issuer: "letsencrypt-prod"
+  hosts:
+    - host: tuyul.envio.co.id
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    # Option 1: Use cert-manager (automatic certificate)
+    - secretName: tuyul-api-tls
+      hosts:
+        - tuyul.envio.co.id
+    # Option 2: Manual certificate (uncomment and provide secret)
+    # - secretName: tuyul-api-tls-manual
+    #   hosts:
+    #     - tuyul.envio.co.id
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Redis configuration
+redis:
+  host: "10.0.11.21"
+  port: "6379"
+  password: "Crypto007!"
+  db: 0
+  prefix: ""
+
+# Indodax API configuration
+indodax:
+  apiUrl: "https://indodax.com"
+  wsUrl: "wss://ws3.indodax.com/ws/"
+  wsToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE5NDY2MTg0MTV9.UR1lBM6Eqh0yWz-PVirw1uPCxe60FdchR8eNVdsskeo"
+  privateWsUrl: "wss://pws.indodax.com/ws/"
+
+# Server configuration
+server:
+  port: "8080"
+
+# Environment variables (will be set as env vars in the pod)
+# Note: JWT_SECRET and ENCRYPTION_KEY should be set via secrets (see secrets section below)
+env:
+  - name: SERVER_ENV
+    value: "production"
+  - name: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+    value: "15"  # 15 minutes
+  - name: JWT_REFRESH_TOKEN_EXPIRE_DAYS
+    value: "7"  # 7 days
+  - name: LOG_LEVEL
+    value: "info"
+  - name: LOG_FORMAT
+    value: "json"
+  - name: CORS_ALLOWED_ORIGINS
+    value: "https://tuyul.envio.co.id"
+  - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+    value: "60"
+  - name: RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE
+    value: "5"
+
+# JWT and Encryption keys (fallback if not using secrets)
+# Note: For production, use secrets section below instead
+jwtSecret: ""  # Must be set (via secrets or here)
+encryptionKey: ""  # Must be exactly 32 bytes (via secrets or here)
+
+# Secrets (will be created as Kubernetes secrets)
+# Recommended for production - secrets are more secure than plain values
+# Note: Redis password is set in redis.password above. Use secrets.redisPassword for production.
+secrets: {}
+  # redisPassword: "Crypto007!"  # Use this instead of redis.password for production
+  # jwtSecret: ""
+  # encryptionKey: ""  # Must be exactly 32 bytes
+  # indodaxWsToken: ""
+

@@ -7,10 +7,9 @@ interface PairDetailModalProps {
   pair: Coin;
   onClose: () => void;
   calculateChange: (coin: Coin, timeframe: '1m' | '5m' | '15m' | '30m') => number;
-  getPumpScoreColor: (score: number) => string;
 }
 
-export const PairDetailModal = memo(({ pair, onClose, calculateChange, getPumpScoreColor }: PairDetailModalProps) => {
+export const PairDetailModal = memo(({ pair, onClose, calculateChange }: PairDetailModalProps) => {
   return (
     <div
       className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
@@ -115,7 +114,7 @@ export const PairDetailModal = memo(({ pair, onClose, calculateChange, getPumpSc
           <div className="grid grid-cols-3 gap-4">
             <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
               <p className="text-gray-400 text-sm mb-1">Pump Score</p>
-              <p className={cn('text-xl font-bold', getPumpScoreColor(pair.pump_score))}>
+              <p className="text-xl font-bold text-white">
                 {pair.pump_score.toFixed(1)}
               </p>
             </div>
