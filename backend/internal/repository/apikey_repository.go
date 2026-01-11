@@ -61,4 +61,29 @@ func (r *APIKeyRepository) Exists(ctx context.Context, userID string) (bool, err
 	return r.redis.Exists(ctx, key)
 }
 
+// GetAllUserIDs returns all user IDs that have API keys
+func (r *APIKeyRepository) GetAllUserIDs(ctx context.Context) ([]string, error) {
+	// Get the pattern for API key keys (e.g., "tuyul:api_key:*")
+	pattern := redis.APIKeyKey("*")
+	keys, err := r.redis.Keys(ctx, pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract user IDs from keys
+	// Key format: "tuyul:api_key:{userID}"
+	userIDs := make([]string, 0, len(keys))
+	prefix := redis.APIKeyKey("")
+	
+	for _, key := range keys {
+		// Remove prefix to get userID
+		if len(key) > len(prefix) {
+			userID := key[len(prefix):]
+			userIDs = append(userIDs, userID)
+		}
+	}
+
+	return userIDs, nil
+}
+
 

@@ -81,7 +81,7 @@ func (s *CopilotService) PlaceBuyOrder(ctx context.Context, userID string, req *
 	}
 
 	// Parse IDR balance
-	idrBalance := s.parseBalance(accountInfo.Balance["idr"])
+	idrBalance := s.parseBalance(accountInfo.Balance["idr"].String())
 	if idrBalance < req.VolumeIDR {
 		return nil, util.NewAppError(400, util.ErrCodeInsufficientBalance,
 			fmt.Sprintf("Insufficient IDR balance. Available: %.2f, Required: %.2f", idrBalance, req.VolumeIDR))
@@ -99,7 +99,10 @@ func (s *CopilotService) PlaceBuyOrder(ctx context.Context, userID string, req *
 	}
 
 	// 6. Place buy order
-	result, err := tradeClient.Trade(ctx, "buy", req.Pair, req.BuyingPrice, amount, "limit")
+	// Generate unique client order ID for copilot trade
+	clientOrderID := fmt.Sprintf("copilot-%s-buy-%d", req.Pair, time.Now().UnixMilli())
+	
+	result, err := tradeClient.Trade(ctx, "buy", req.Pair, req.BuyingPrice, amount, "limit", clientOrderID)
 	if err != nil {
 		return nil, util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI, "Failed to place buy order", err.Error())
 	}
@@ -253,8 +256,8 @@ func (s *CopilotService) validateTradeRequest(req *model.TradeRequest) error {
 		return util.NewAppError(400, util.ErrCodeValidation, "Buying price must be greater than 0")
 	}
 
-	if req.VolumeIDR < 10000 {
-		return util.NewAppError(400, util.ErrCodeValidation, "Minimum volume is 10,000 IDR")
+	if req.VolumeIDR < util.MinOrderValueIDR {
+		return util.NewAppError(400, util.ErrCodeValidation, fmt.Sprintf("Minimum volume is %.0f IDR", util.MinOrderValueIDR))
 	}
 
 	if req.TargetProfit < 0.1 || req.TargetProfit > 1000 {
@@ -323,7 +326,8 @@ func (s *CopilotService) PlaceAutoSell(ctx context.Context, trade *model.Trade, 
 	} else {
 		// Extract coin symbol and get balance
 		coinSymbol := s.extractCoinSymbol(trade.Pair)
-		if balanceStr, ok := accountInfo.Balance[coinSymbol]; ok {
+		if balanceVal, ok := accountInfo.Balance[coinSymbol]; ok {
+			balanceStr := balanceVal.String()
 			balance := s.parseBalance(balanceStr)
 			if balance > 0 {
 				filledAmount = balance
@@ -332,7 +336,10 @@ func (s *CopilotService) PlaceAutoSell(ctx context.Context, trade *model.Trade, 
 	}
 
 	// 4. Place sell order
-	result, err := tradeClient.Trade(ctx, "sell", trade.Pair, sellPrice, filledAmount, "limit")
+	// Generate unique client order ID for auto-sell
+	clientOrderID := fmt.Sprintf("copilot-%s-sell-%d", trade.Pair, time.Now().UnixMilli())
+	
+	result, err := tradeClient.Trade(ctx, "sell", trade.Pair, sellPrice, filledAmount, "limit", clientOrderID)
 	if err != nil {
 		s.log.Errorf("Failed to place auto-sell order: %v", err)
 		trade.Status = model.TradeStatusError
@@ -415,7 +422,7 @@ func (s *CopilotService) ManualSell(ctx context.Context, userID string, tradeID 
 	}
 
 	coinSymbol := s.extractCoinSymbol(trade.Pair)
-	sellAmount := s.parseBalance(accountInfo.Balance[coinSymbol])
+	sellAmount := s.parseBalance(accountInfo.Balance[coinSymbol].String())
 
 	if sellAmount <= 0 {
 		return util.NewAppError(400, util.ErrCodeInsufficientBalance, "No coins available to sell")
@@ -424,8 +431,11 @@ func (s *CopilotService) ManualSell(ctx context.Context, userID string, tradeID 
 	// 6. Place market sell order (use current market price)
 	// For market orders, we can use a very low price to ensure immediate fill
 	marketPrice := trade.BuyPrice * 0.95 // 5% below buy price to ensure fill
+	
+	// Generate unique client order ID for manual sell
+	clientOrderID := fmt.Sprintf("copilot-%s-manualsell-%d", trade.Pair, time.Now().UnixMilli())
 
-	result, err := tradeClient.Trade(ctx, "sell", trade.Pair, marketPrice, sellAmount, "market")
+	result, err := tradeClient.Trade(ctx, "sell", trade.Pair, marketPrice, sellAmount, "market", clientOrderID)
 	if err != nil {
 		return util.NewAppErrorWithDetails(400, util.ErrCodeIndodaxAPI, "Failed to place manual sell", err.Error())
 	}

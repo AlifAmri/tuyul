@@ -101,13 +101,17 @@ func (s *MarketDataService) RefreshMetadata() error {
 	// Fetch increments
 	increments, err := s.restClient.GetPriceIncrements(ctx)
 	if err == nil {
+		// Normalize keys: remove underscores to match pair IDs (cst_idr -> cstidr)
+		normalizedIncrements := make(map[string]string)
 		for pair, inc := range increments {
 			f, _ := strconv.ParseFloat(inc, 64)
-			s.increments.Store(pair, f)
+			normalizedPair := strings.ReplaceAll(pair, "_", "")
+			s.increments.Store(normalizedPair, f)
+			normalizedIncrements[normalizedPair] = inc
 		}
-		// Save to Redis
-		s.redisClient.SetJSON(ctx, redis.CachePriceIncrementsKey(), increments, 0)
-		logger.Infof("Successfully refreshed %d price increments from Indodax", len(increments))
+		// Save normalized increments to Redis
+		s.redisClient.SetJSON(ctx, redis.CachePriceIncrementsKey(), normalizedIncrements, 0)
+		logger.Infof("Successfully refreshed %d price increments from Indodax (normalized keys)", len(increments))
 	} else {
 		logger.Errorf("Failed to refresh increments: %v", err)
 		return err
@@ -143,7 +147,9 @@ func (s *MarketDataService) LoadMetadata() bool {
 	if err := s.redisClient.GetJSON(ctx, redis.CachePriceIncrementsKey(), &increments); err == nil {
 		for pair, inc := range increments {
 			f, _ := strconv.ParseFloat(inc, 64)
-			s.increments.Store(pair, f)
+			// Keys should already be normalized in Redis, but ensure consistency
+			normalizedPair := strings.ReplaceAll(pair, "_", "")
+			s.increments.Store(normalizedPair, f)
 		}
 		logger.Infof("Loaded %d price increments from Redis", len(increments))
 	}
@@ -362,6 +368,7 @@ func (s *MarketDataService) saveCoinToRedis(coin *model.Coin) {
 	s.redisClient.ZAdd(ctx, redis.ChangeRankKey(), redis.Z{Score: coin.Change24h, Member: coin.PairID})
 	s.redisClient.ZAdd(ctx, redis.VolumeRankKey(), redis.Z{Score: coin.VolumeIDR, Member: coin.PairID})
 
+	// Add to active pairs set
 	s.redisClient.SAdd(ctx, redis.ActivePairsKey(), coin.PairID)
 }
 
@@ -371,6 +378,11 @@ func (s *MarketDataService) PerformTimeframeReset(pairID string, now time.Time) 
 		return
 	}
 	coin := val.(*model.Coin)
+
+	if coin.LastReset == nil {
+		logger.Warnf("Pair %s: LastReset map is nil", pairID)
+		return
+	}
 
 	updated := false
 	if s.shouldReset("1m", coin.LastReset["1m"], now) {
@@ -393,6 +405,14 @@ func (s *MarketDataService) PerformTimeframeReset(pairID string, now time.Time) 
 	if updated {
 		coin.PumpScore = CalculatePumpScore(coin)
 		s.saveCoinToRedis(coin)
+
+		// Notify subscribers about timeframe reset
+		s.mu.RLock()
+		handlers := s.subscribers
+		s.mu.RUnlock()
+		for _, h := range handlers {
+			h(coin)
+		}
 	}
 }
 
@@ -493,7 +513,7 @@ func (s *MarketDataService) GetCoin(ctx context.Context, pairID string) (*model.
 }
 
 // GetSortedCoins retrieves a list of coins from a sorted set
-func (s *MarketDataService) GetSortedCoins(ctx context.Context, sortKey string, limit int, minVolume float64) ([]*model.Coin, error) {
+func (s *MarketDataService) GetSortedCoins(ctx context.Context, sortKey string, limit int, minVolume float64, minPumpScore float64) ([]*model.Coin, error) {
 	// Get pair IDs from sorted set
 	stop := int64(limit - 1)
 	if limit <= 0 {
@@ -511,10 +531,13 @@ func (s *MarketDataService) GetSortedCoins(ctx context.Context, sortKey string, 
 			continue
 		}
 
-		// Filter: Only exclude if NO volume (VolumeIDR <= 0)
+		// Filter by volume: Only exclude if NO volume (VolumeIDR <= 0)
 		// We trust the minVolume param from handler if provided, otherwise standard is > 0
 		if coin.VolumeIDR > 0 && coin.VolumeIDR >= minVolume {
-			coins = append(coins, coin)
+			// Filter by pump score if specified
+			if minPumpScore <= 0 || coin.PumpScore >= minPumpScore {
+				coins = append(coins, coin)
+			}
 		}
 	}
 
@@ -525,11 +548,8 @@ func (s *MarketDataService) pollGapData() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			s.updateGapsFromREST()
-		}
+	for range ticker.C {
+		s.updateGapsFromREST()
 	}
 }
 
@@ -599,6 +619,15 @@ func (s *MarketDataService) updateGapsFromREST() {
 			// Save to Cache & Redis
 			s.coinCache.Store(pairID, coin)
 			go s.saveCoinToRedis(coin)
+
+			// Notify subscribers about gap/bid/ask updates
+			s.mu.RLock()
+			handlers := s.subscribers
+			s.mu.RUnlock()
+			for _, h := range handlers {
+				h(coin)
+			}
+
 			updatedCount++
 		}
 	}

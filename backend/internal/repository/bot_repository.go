@@ -194,6 +194,27 @@ func (r *BotRepository) ListByUser(ctx context.Context, userID string) ([]*model
 	return bots, nil
 }
 
+// ExistsByTypePairMode checks if a bot with the same type, pair, and mode (paper/live) already exists for a user
+// excludeBotID can be used to exclude a specific bot from the check (useful for updates)
+func (r *BotRepository) ExistsByTypePairMode(ctx context.Context, userID string, botType string, pair string, isPaperTrading bool, excludeBotID int64) (bool, error) {
+	bots, err := r.ListByUser(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+
+	for _, bot := range bots {
+		// Skip the excluded bot (for update scenarios)
+		if excludeBotID > 0 && bot.ID == excludeBotID {
+			continue
+		}
+		if bot.Type == botType && bot.Pair == pair && bot.IsPaperTrading == isPaperTrading {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // ListByStatus retrieves all bots with a specific status
 func (r *BotRepository) ListByStatus(ctx context.Context, status string) ([]*model.BotConfig, error) {
 	statusKey := redis.BotsByStatusKey(status)
@@ -238,6 +259,21 @@ func (r *BotRepository) UpdateStats(ctx context.Context, botID int64, totalTrade
 	bot.TotalTrades = totalTrades
 	bot.WinningTrades = winningTrades
 	bot.TotalProfitIDR = totalProfit
+	bot.UpdatedAt = time.Now()
+
+	return r.Update(ctx, bot, "")
+}
+
+// UpdateTracking updates bot buy price tracking fields
+func (r *BotRepository) UpdateTracking(ctx context.Context, botID int64, totalCoinBought, totalCostIDR, lastBuyPrice float64) error {
+	bot, err := r.GetByID(ctx, botID)
+	if err != nil {
+		return err
+	}
+
+	bot.TotalCoinBought = totalCoinBought
+	bot.TotalCostIDR = totalCostIDR
+	bot.LastBuyPrice = lastBuyPrice
 	bot.UpdatedAt = time.Now()
 
 	return r.Update(ctx, bot, "")

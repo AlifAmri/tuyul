@@ -33,7 +33,7 @@ func (h *MarketHandler) GetSummary(c *gin.Context) {
 	minVolStr := c.DefaultQuery("min_volume", "0")
 	minVol, _ := strconv.ParseFloat(minVolStr, 64)
 
-	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.PumpScoreRankKey(), limit, minVol)
+	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.PumpScoreRankKey(), limit, minVol, 0)
 	if err != nil {
 		util.SendError(c, err)
 		return
@@ -54,7 +54,10 @@ func (h *MarketHandler) GetPumpScores(c *gin.Context) {
 	minVolStr := c.DefaultQuery("min_volume", "0")
 	minVol, _ := strconv.ParseFloat(minVolStr, 64)
 
-	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.PumpScoreRankKey(), limit, minVol)
+	minPumpScoreStr := c.DefaultQuery("min_pump_score", "0")
+	minPumpScore, _ := strconv.ParseFloat(minPumpScoreStr, 64)
+
+	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.PumpScoreRankKey(), limit, minVol, minPumpScore)
 	if err != nil {
 		util.SendError(c, err)
 		return
@@ -76,7 +79,7 @@ func (h *MarketHandler) GetGaps(c *gin.Context) {
 	minVol, _ := strconv.ParseFloat(minVolStr, 64)
 
 	// Fetch coins sorted by gap (ZRevRange gets highest scores first)
-	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.GapRankKey(), limit, minVol)
+	coins, err := h.marketService.GetSortedCoins(c.Request.Context(), redis.GapRankKey(), limit, minVol, 0)
 	if err != nil {
 		util.SendError(c, err)
 		return

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 type OrderMonitor struct {
 	tradeRepo           *repository.TradeRepository
 	orderRepo           *repository.OrderRepository
+	apiKeyRepo          *repository.APIKeyRepository
 	apiKeyService       *APIKeyService
 	notificationService *NotificationService
 	indodaxClient       *indodax.Client
@@ -40,6 +42,7 @@ type OrderMonitor struct {
 func NewOrderMonitor(
 	tradeRepo *repository.TradeRepository,
 	orderRepo *repository.OrderRepository,
+	apiKeyRepo *repository.APIKeyRepository,
 	apiKeyService *APIKeyService,
 	notificationService *NotificationService,
 	indodaxClient *indodax.Client,
@@ -47,6 +50,7 @@ func NewOrderMonitor(
 	return &OrderMonitor{
 		tradeRepo:           tradeRepo,
 		orderRepo:           orderRepo,
+		apiKeyRepo:          apiKeyRepo,
 		apiKeyService:       apiKeyService,
 		notificationService: notificationService,
 		indodaxClient:       indodaxClient,
@@ -102,13 +106,23 @@ func (m *OrderMonitor) SubscribeUserOrders(ctx context.Context, userID string) e
 		m.log.Errorf("Private WS error for user %s: %v", userID, err)
 	})
 
-	// Connect
+	// Connect (this will authenticate and subscribe)
 	if err := wsClient.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect private websocket: %w", err)
 	}
 
+	// Wait for authentication and subscription confirmation (5 second timeout)
+	// This ensures the connection is fully established before allowing bot to start
+	subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	
+	if err := wsClient.WaitForSubscription(subCtx, 5*time.Second); err != nil {
+		wsClient.Close()
+		return fmt.Errorf("failed to verify private websocket subscription: %w", err)
+	}
+
 	m.wsClients[userID] = wsClient
-	m.log.Infof("Subscribed to order updates for user %s", userID)
+	m.log.Infof("Subscribed to order updates for user %s (verified)", userID)
 
 	return nil
 }
@@ -125,9 +139,64 @@ func (m *OrderMonitor) UnsubscribeUserOrders(userID string) {
 	}
 }
 
+// IsSubscribed checks if a user is already subscribed to order updates
+func (m *OrderMonitor) IsSubscribed(userID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.wsClients[userID]
+	return exists
+}
+
+// SubscribeAllUsersWithAPIKeys subscribes to order updates for all users with API keys
+// This is called on API boot to establish connections proactively
+func (m *OrderMonitor) SubscribeAllUsersWithAPIKeys(ctx context.Context) error {
+	// Get all users with API keys
+	userIDs, err := m.apiKeyRepo.GetAllUserIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get users with API keys: %w", err)
+	}
+
+	if len(userIDs) == 0 {
+		m.log.Info("No users with API keys found, skipping subscription")
+		return nil
+	}
+
+	m.log.Infof("Found %d users with API keys, subscribing to order updates...", len(userIDs))
+
+	successCount := 0
+	failureCount := 0
+
+	for _, userID := range userIDs {
+		// Subscribe (errors are logged but don't stop the process)
+		if err := m.SubscribeUserOrders(ctx, userID); err != nil {
+			m.log.Warnf("Failed to subscribe user %s: %v", userID, err)
+			failureCount++
+		} else {
+			successCount++
+		}
+	}
+
+	m.log.Infof("Subscription complete: %d succeeded, %d failed", successCount, failureCount)
+	return nil
+}
+
 // handleOrderUpdate processes order update events from WebSocket
 func (m *OrderMonitor) handleOrderUpdate(userID string, order *indodax.OrderUpdate) {
 	ctx := context.Background()
+
+	// Log FULL order update data for debugging
+	orderJSON, _ := json.Marshal(order)
+	status := strings.ToLower(order.Status)
+	
+	if status == "filled" {
+		executedQty, _ := strconv.ParseFloat(order.ExecutedQty, 64)
+		price, _ := strconv.ParseFloat(order.Price, 64)
+		m.log.Infof("[WS_ORDER_UPDATE] OrderMonitor: Received FILLED order update - Full Data: %s, UserID=%s, ExecutedQty=%.8f, Price=%.2f",
+			string(orderJSON), userID, executedQty, price)
+	} else {
+		m.log.Infof("[WS_ORDER_UPDATE] OrderMonitor: Received order update - Full Data: %s, UserID=%s, Status=%s",
+			string(orderJSON), userID, status)
+	}
 
 	// Notify generic handlers
 	m.mu.RLock()
@@ -145,6 +214,9 @@ func (m *OrderMonitor) handleOrderUpdate(userID string, order *indodax.OrderUpda
 	if err != nil {
 		// Optimization: if not found, it might be an order placed before this system restart
 		// or placed externally. We'll ignore it.
+		if status == "filled" {
+			m.log.Debugf("OrderMonitor: Filled order %s not found in database (may be external order or from before restart)", indodaxOrderID)
+		}
 		return
 	}
 

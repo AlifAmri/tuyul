@@ -4,19 +4,20 @@ import "time"
 
 // APIKey represents an Indodax API key
 type APIKey struct {
-	UserID          string    `json:"user_id"`
-	EncryptedKey    string    `json:"-"` // Never expose encrypted key
-	EncryptedSecret string    `json:"-"` // Never expose encrypted secret
-	IsValid         bool      `json:"is_valid"`
+	UserID          string     `json:"user_id"`
+	EncryptedKey    string     `json:"encrypted_key"`    // Stored in Redis, never exposed in API responses
+	EncryptedSecret string     `json:"encrypted_secret"` // Stored in Redis, never exposed in API responses
+	IsValid         bool       `json:"is_valid"`
 	LastValidatedAt *time.Time `json:"last_validated_at,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // APIKeyRequest represents API key creation/update request
 type APIKeyRequest struct {
-	Key    string `json:"key" binding:"required"`
-	Secret string `json:"secret" binding:"required"`
+	Key    string `json:"api_key" binding:"required"`
+	Secret string `json:"api_secret" binding:"required"`
+	Label  string `json:"label,omitempty"`
 }
 
 // APIKeyResponse represents API key response (without secret)

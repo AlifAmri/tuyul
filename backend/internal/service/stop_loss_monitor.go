@@ -169,7 +169,7 @@ func (m *StopLossMonitor) triggerStopLoss(ctx context.Context, trade *model.Trad
 	}
 
 	coinSymbol := m.extractCoinSymbol(trade.Pair)
-	sellAmount := m.parseBalance(accountInfo.Balance[coinSymbol])
+	sellAmount := m.parseBalance(accountInfo.Balance[coinSymbol].String())
 
 	if sellAmount <= 0 {
 		return fmt.Errorf("no coins available to sell")
@@ -179,8 +179,11 @@ func (m *StopLossMonitor) triggerStopLoss(ctx context.Context, trade *model.Trad
 	// Use 10% below current price to ensure immediate fill
 	marketPrice := currentPrice * 0.90
 	marketPrice = util.RoundToPrecision(marketPrice, 0)
+	
+	// Generate unique client order ID for stop-loss sell
+	clientOrderID := fmt.Sprintf("copilot-%s-stoploss-%d", trade.Pair, time.Now().UnixMilli())
 
-	result, err := tradeClient.Trade(ctx, "sell", trade.Pair, marketPrice, sellAmount, "market")
+	result, err := tradeClient.Trade(ctx, "sell", trade.Pair, marketPrice, sellAmount, "market", clientOrderID)
 	if err != nil {
 		return fmt.Errorf("failed to place stop-loss sell order: %w", err)
 	}

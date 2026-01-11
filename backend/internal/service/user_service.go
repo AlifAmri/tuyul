@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strconv"
 	"time"
 
 	"tuyul/backend/internal/model"
@@ -294,13 +293,9 @@ func (s *UserService) GetStats(ctx context.Context, userID string) (*model.UserS
 		}
 	}
 
-	// 3. Get Real IDR Balance if API Key exists
-	if s.apiService != nil {
-		info, err := s.apiService.GetAccountInfo(ctx, userID)
-		if err == nil && info != nil {
-			stats.RealIDRBalance, _ = strconv.ParseFloat(info.Balance["idr"], 64)
-		}
-	}
+	// Note: RealIDRBalance is not fetched here to avoid Indodax API calls
+	// Stats endpoint should only read from Redis/cache, not make external API calls
+	// If real balance is needed, it should be fetched separately via /api/v1/api-keys/account-info
 
 	// Calculate average win rate
 	if stats.TotalTrades > 0 {

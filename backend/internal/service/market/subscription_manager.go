@@ -10,11 +10,20 @@ import (
 	"tuyul/backend/pkg/logger"
 )
 
-// OrderBookTicker represents the best bid and ask for a pair
+// OrderBookLevel represents a single price level in the orderbook
+type OrderBookLevel struct {
+	Price      float64 `json:"price"`
+	BaseVolume float64 `json:"base_volume"` // e.g., BTC volume for BTC/IDR
+	IDRVolume  float64 `json:"idr_volume"`  // IDR volume at this price level
+}
+
+// OrderBookTicker represents the full orderbook depth for a pair
 type OrderBookTicker struct {
-	Pair    string  `json:"pair"`
-	BestBid float64 `json:"best_bid"`
-	BestAsk float64 `json:"best_ask"`
+	Pair    string          `json:"pair"`
+	BestBid float64         `json:"best_bid"` // For backward compatibility
+	BestAsk float64         `json:"best_ask"` // For backward compatibility
+	Bids    []OrderBookLevel `json:"bids"`     // All bid levels (sorted: highest first)
+	Asks    []OrderBookLevel `json:"asks"`     // All ask levels (sorted: lowest first)
 }
 
 // TickerHandler is a callback function for ticker updates
@@ -141,10 +150,14 @@ func (sm *SubscriptionManager) handleWSMessage(channel string, data []byte) {
 		Data struct {
 			Pair string `json:"pair"`
 			Ask  []struct {
-				Price string `json:"price"`
+				Price      string `json:"price"`
+				BaseVolume string `json:"btc_volume"` // Note: field name varies by pair (btc_volume, eth_volume, etc.)
+				IDRVolume  string `json:"idr_volume"`
 			} `json:"ask"`
 			Bid []struct {
-				Price string `json:"price"`
+				Price      string `json:"price"`
+				BaseVolume string `json:"btc_volume"` // Note: field name varies by pair
+				IDRVolume  string `json:"idr_volume"`
 			} `json:"bid"`
 		} `json:"data"`
 		Offset int64 `json:"offset"`
@@ -160,21 +173,65 @@ func (sm *SubscriptionManager) handleWSMessage(channel string, data []byte) {
 		return
 	}
 
-	// Parse best prices (first element in ask/bid arrays is the best price)
-	var bestAsk, bestBid float64
-	if _, err := fmt.Sscanf(obData.Data.Ask[0].Price, "%f", &bestAsk); err != nil {
-		sm.log.Errorf("Failed to parse ask price for %s: %v", pair, err)
-		return
+	// Parse all bid levels
+	bids := make([]OrderBookLevel, 0, len(obData.Data.Bid))
+	for _, bid := range obData.Data.Bid {
+		var price, baseVol, idrVol float64
+		if _, err := fmt.Sscanf(bid.Price, "%f", &price); err != nil {
+			sm.log.Warnf("Failed to parse bid price for %s: %v (skipping level)", pair, err)
+			continue
+		}
+		if _, err := fmt.Sscanf(bid.BaseVolume, "%f", &baseVol); err != nil {
+			// Base volume might be missing or empty, set to 0
+			baseVol = 0
+		}
+		if _, err := fmt.Sscanf(bid.IDRVolume, "%f", &idrVol); err != nil {
+			// IDR volume might be missing or empty, set to 0
+			idrVol = 0
+		}
+		bids = append(bids, OrderBookLevel{
+			Price:      price,
+			BaseVolume: baseVol,
+			IDRVolume:  idrVol,
+		})
 	}
-	if _, err := fmt.Sscanf(obData.Data.Bid[0].Price, "%f", &bestBid); err != nil {
-		sm.log.Errorf("Failed to parse bid price for %s: %v", pair, err)
-		return
+
+	// Parse all ask levels
+	asks := make([]OrderBookLevel, 0, len(obData.Data.Ask))
+	for _, ask := range obData.Data.Ask {
+		var price, baseVol, idrVol float64
+		if _, err := fmt.Sscanf(ask.Price, "%f", &price); err != nil {
+			sm.log.Warnf("Failed to parse ask price for %s: %v (skipping level)", pair, err)
+			continue
+	}
+		if _, err := fmt.Sscanf(ask.BaseVolume, "%f", &baseVol); err != nil {
+			baseVol = 0
+		}
+		if _, err := fmt.Sscanf(ask.IDRVolume, "%f", &idrVol); err != nil {
+			idrVol = 0
+		}
+		asks = append(asks, OrderBookLevel{
+			Price:      price,
+			BaseVolume: baseVol,
+			IDRVolume:  idrVol,
+		})
+	}
+
+	// Extract best prices (first element is best)
+	var bestBid, bestAsk float64
+	if len(bids) > 0 {
+		bestBid = bids[0].Price
+	}
+	if len(asks) > 0 {
+		bestAsk = asks[0].Price
 	}
 
 	ticker := OrderBookTicker{
 		Pair:    pair,
-		BestAsk: bestAsk,
 		BestBid: bestBid,
+		BestAsk: bestAsk,
+		Bids:    bids,
+		Asks:    asks,
 	}
 
 	// Notify subscribers

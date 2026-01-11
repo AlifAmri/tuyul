@@ -15,4 +15,8 @@ type BotSummary struct {
 	AverageProfit  float64    `json:"average_profit"`
 	Uptime         string     `json:"uptime"`
 	LastTradeAt    *time.Time `json:"last_trade_at,omitempty"`
+	// Market data
+	BuyPrice      float64 `json:"buy_price,omitempty"`      // Current bid price
+	SellPrice     float64 `json:"sell_price,omitempty"`     // Current ask price
+	SpreadPercent float64 `json:"spread_percent,omitempty"` // Current spread percentage
 }

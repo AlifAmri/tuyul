@@ -51,6 +51,11 @@ type BotConfig struct {
 	WinningTrades  int     `json:"winning_trades"`
 	TotalProfitIDR float64 `json:"total_profit_idr"`
 
+	// Buy price tracking (for profit calculation)
+	TotalCoinBought float64 `json:"total_coin_bought"` // Total coins bought (for weighted average)
+	TotalCostIDR    float64 `json:"total_cost_idr"`    // Total cost in IDR (for weighted average)
+	LastBuyPrice    float64 `json:"last_buy_price"`    // Average buy price (TotalCostIDR / TotalCoinBought)
+
 	// Status
 	Status       string  `json:"status"` // stopped, starting, running, error
 	ErrorMessage *string `json:"error_message,omitempty"`
@@ -70,9 +75,9 @@ type BotConfigRequest struct {
 
 	// Market Maker parameters
 	InitialBalanceIDR          float64 `json:"initial_balance_idr" binding:"required,gt=0"`
-	OrderSizeIDR               float64 `json:"order_size_idr" binding:"required,gt=0"`
-	MinGapPercent              float64 `json:"min_gap_percent" binding:"required,gte=0"`
-	RepositionThresholdPercent float64 `json:"reposition_threshold_percent" binding:"required,gte=0"`
+	OrderSizeIDR               float64 `json:"order_size_idr"` // Validation handled in service layer based on bot type
+	MinGapPercent              float64 `json:"min_gap_percent" binding:"required_if=Type market_maker,gte=0"`
+	RepositionThresholdPercent float64 `json:"reposition_threshold_percent" binding:"required_if=Type market_maker,gte=0"`
 	MaxLossIDR                 float64 `json:"max_loss_idr" binding:"required_if=Type market_maker"`
 
 	// Pump Hunter parameters
@@ -117,7 +122,7 @@ type Order struct {
 	OrderID      string  `json:"order_id"`    // Indodax order ID or paper order ID
 	Pair         string  `json:"pair"`
 	Side         string  `json:"side"`   // buy, sell
-	Status       string  `json:"status"` // open, filled, cancelled
+	Status       string  `json:"status"` // open, filled, cancelled, partial
 	Price        float64 `json:"price"`
 	Amount       float64 `json:"amount"`
 	FilledAmount float64 `json:"filled_amount"`

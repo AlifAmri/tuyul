@@ -386,13 +386,13 @@ func (s *MarketMakerService) StartBot(ctx context.Context, userID string, botID 
 		if currentIDR < 0 {
 			s.log.Warnf("Bot %d: IDR balance is negative (%.2f), resetting", botID, currentIDR)
 			needsReset = true
-		} else if bot.InitialBalanceIDR > 0 && (currentIDR == 0 || currentIDR > bot.InitialBalanceIDR*10 || currentIDR > 1000000000) {
+		} else if bot.InitialBalanceIDR > 0 && (currentIDR == 0 || currentIDR > bot.InitialBalanceIDR*10 || currentIDR > util.MaxReasonableIDRBalance) {
 			s.log.Warnf("Bot %d: IDR balance looks corrupted (%.2f), resetting to initial (%.2f)",
 				botID, currentIDR, bot.InitialBalanceIDR)
 			needsReset = true
 		}
 
-		if currentCoin < 0 || currentCoin > 1000000 {
+		if currentCoin < 0 || currentCoin > util.MaxReasonableCoinAmount {
 			s.log.Warnf("Bot %d: %s balance looks corrupted (%.8f), resetting to 0",
 				botID, inst.BaseCurrency, currentCoin)
 			needsReset = true
@@ -754,7 +754,7 @@ func (s *MarketMakerService) StopBot(ctx context.Context, userID string, botID i
 
 			if err := targetInst.TradeClient.CancelOrder(cancelCtx, bot.Pair, targetInst.ActiveOrder.OrderID, targetInst.ActiveOrder.Side); err != nil {
 				// "Order not found" is expected if order was already filled/cancelled
-				if s.isOrderNotFoundError(err) {
+				if util.IsOrderNotFoundError(err) {
 					s.log.Debugf("Bot %d: Active order %s already filled/cancelled (not found)", botID, targetInst.ActiveOrder.OrderID)
 				} else {
 					s.log.Warnf("Bot %d: Failed to cancel active order %s: %v", botID, targetInst.ActiveOrder.OrderID, err)
@@ -796,7 +796,7 @@ func (s *MarketMakerService) StopBot(ctx context.Context, userID string, botID i
 					s.log.Debugf("Bot %d: Cancelling open order %d (ID: %s)", botID, order.ID, order.OrderID)
 					if err := targetInst.TradeClient.CancelOrder(cancelCtx, order.Pair, order.OrderID, order.Side); err != nil {
 						// "Order not found" is expected if order was already filled/cancelled
-						if s.isOrderNotFoundError(err) {
+						if util.IsOrderNotFoundError(err) {
 							s.log.Debugf("Bot %d: Order %d (ID: %s) already filled/cancelled (not found)", botID, order.ID, order.OrderID)
 						} else {
 							s.log.Warnf("Bot %d: Failed to cancel order %d: %v", botID, order.ID, err)
@@ -836,44 +836,11 @@ func (s *MarketMakerService) StopBot(ctx context.Context, userID string, botID i
 	return nil
 }
 
-// isAPIKeyError checks if an error is related to API key issues
-func (s *MarketMakerService) isAPIKeyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "api key") ||
-		strings.Contains(errStr, "invalid credentials") ||
-		strings.Contains(errStr, "bad sign") ||
-		strings.Contains(errStr, util.ErrCodeAPIKeyInvalid) ||
-		strings.Contains(errStr, "api_key_invalid")
-}
-
-// isCriticalTradingError checks if an error is critical and should stop the bot
-func (s *MarketMakerService) isCriticalTradingError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	// API key errors
-	if s.isAPIKeyError(err) {
-		return true
-	}
-	// Invalid pair - configuration issue that prevents trading
-	if strings.Contains(errStr, "invalid pair") {
-		return true
-	}
-	return false
-}
-
-// isOrderNotFoundError checks if an error is "Order not found" (non-critical, order already filled/cancelled)
-func (s *MarketMakerService) isOrderNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "order not found")
-}
+// Note: Error checking functions (isAPIKeyError, isCriticalTradingError, isOrderNotFoundError)
+// have been replaced with shared utilities from util package:
+// - util.IsAPIKeyError
+// - util.IsCriticalTradingError
+// - util.IsOrderNotFoundError
 
 // stopBotWithError stops a bot and sets error status (for live bots only)
 func (s *MarketMakerService) stopBotWithError(botID int64, userID string, errorMsg string) {
@@ -1086,20 +1053,11 @@ func (s *MarketMakerService) placeNewOrder(inst *BotInstance, ticker market.Orde
 	}
 	pairInfo := inst.PairInfo
 
-	// Use VolumePrecision if valid, otherwise fallback to PriceRound, then default to 8
-	volumePrecision := pairInfo.VolumePrecision
-	if volumePrecision <= 0 {
-		if pairInfo.PriceRound > 0 {
-			volumePrecision = pairInfo.PriceRound
-			s.log.Debugf("Bot %d: VolumePrecision is 0, using PriceRound=%d from API", inst.Config.ID, volumePrecision)
-		} else {
-			volumePrecision = 8 // Final fallback to 8 decimal places for crypto
-			s.log.Debugf("Bot %d: VolumePrecision and PriceRound are both 0, using default 8", inst.Config.ID)
-		}
-	}
+	// Get volume precision (using shared utility)
+	volumePrecision := util.GetVolumePrecision(*pairInfo)
 
 	s.log.Debugf("Bot %d: Pair info - VolumePrecision=%d, TradeMinBaseCurrency=%d, TradeMinTradedCurrency=%.2f",
-		inst.Config.ID, pairInfo.VolumePrecision, pairInfo.TradeMinBaseCurrency, pairInfo.TradeMinTradedCurrency)
+		inst.Config.ID, volumePrecision, pairInfo.TradeMinBaseCurrency, pairInfo.TradeMinTradedCurrency)
 
 	var side string
 	var price, amount float64
@@ -1160,7 +1118,7 @@ func (s *MarketMakerService) placeNewOrder(inst *BotInstance, ticker market.Orde
 		amount = roundedCoinBalance // Use rounded amount (already validated > 0)
 
 		// Safety check: don't sell if amount is unreasonably large (corruption protection)
-		if amount > 1000000 {
+		if amount > util.MaxReasonableCoinAmount {
 			s.log.Errorf("Bot %d: Refusing to place SELL order - amount %.8f is unreasonably large", inst.Config.ID, amount)
 			return
 		}
@@ -1201,31 +1159,27 @@ func (s *MarketMakerService) placeNewOrder(inst *BotInstance, ticker market.Orde
 		return
 	}
 
-	// Round amount and validate
+	// Validate order amount (using shared utility)
+	s.log.Debugf("Bot %d: Before validation - amount=%.8f, volumePrecision=%d", inst.Config.ID, amount, volumePrecision)
 
-	s.log.Debugf("Bot %d: Before rounding - amount=%.8f, volumePrecision=%d", inst.Config.ID, amount, volumePrecision)
-	amount = util.FloorToPrecision(amount, volumePrecision)
-	s.log.Debugf("Bot %d: After rounding - amount=%.8f", inst.Config.ID, amount)
+	validation := util.ValidateOrderAmount(
+		inst.Config.ID,
+		amount,
+		price,
+		*pairInfo,
+		volumePrecision,
+		inst.BaseCurrency,
+		s.log,
+	)
 
-	// Validate minimum coin amount (TradeMinTradedCurrency is the minimum coin amount, e.g., 0.001 BTC, 1.0 CST)
-	if amount < pairInfo.TradeMinTradedCurrency {
-		s.log.Debugf("Bot %d: Coin amount too small - %.8f %s < minimum %.8f %s",
-			inst.Config.ID, amount, inst.BaseCurrency,
-			pairInfo.TradeMinTradedCurrency, inst.BaseCurrency)
+	if !validation.Valid {
+		s.log.Debugf("Bot %d: Order validation failed - %s", inst.Config.ID, validation.Reason)
 		return
 	}
 
-	// Validate minimum order value in IDR (TradeMinBaseCurrency is the minimum IDR value)
-	orderValueIDR := amount * price
-	if orderValueIDR < float64(pairInfo.TradeMinBaseCurrency) {
-		s.log.Debugf("Bot %d: Order value too small - %.2f IDR < minimum %d IDR (amount=%.8f * price=%.2f)",
-			inst.Config.ID, orderValueIDR, pairInfo.TradeMinBaseCurrency, amount, price)
-		return
-	}
-
-	s.log.Debugf("Bot %d: Order validation passed - amount=%.8f %s (min=%.8f), value=%.2f IDR (min=%d)",
-		inst.Config.ID, amount, inst.BaseCurrency, pairInfo.TradeMinTradedCurrency,
-		orderValueIDR, pairInfo.TradeMinBaseCurrency)
+	// Use validated amount
+	amount = validation.Amount
+	s.log.Debugf("Bot %d: After validation - amount=%.8f, orderValue=%.2f IDR", inst.Config.ID, amount, validation.OrderValue)
 
 	// Double-check: Don't place if active order exists (defense against race conditions)
 	if inst.ActiveOrder != nil && inst.ActiveOrder.Status == "open" {
@@ -1237,9 +1191,8 @@ func (s *MarketMakerService) placeNewOrder(inst *BotInstance, ticker market.Orde
 	// Place order
 	ctx := context.Background()
 
-	// Generate unique client order ID with bot ID to prevent race conditions
-	// Format: bot{botID}-{pair}-{side}-{timestamp}
-	clientOrderID := fmt.Sprintf("bot%d-%s-%s-%d", inst.Config.ID, inst.Config.Pair, strings.ToLower(side), time.Now().UnixMilli())
+	// Generate unique client order ID (using shared utility)
+	clientOrderID := GenerateClientOrderID(inst.Config.ID, inst.Config.Pair, side)
 
 	// CRITICAL: Create placeholder order BEFORE API call to prevent race conditions
 	// This ensures the safety check blocks concurrent placeNewOrder calls
@@ -1473,7 +1426,7 @@ func (s *MarketMakerService) checkReposition(inst *BotInstance, ticker market.Or
 		}
 
 		// Order not found - wait for WebSocket confirmation
-		if s.isOrderNotFoundError(err) {
+		if util.IsOrderNotFoundError(err) {
 			s.log.Infof("Bot %d: Order %s not found on exchange - likely filled or cancelled, waiting for WebSocket confirmation", inst.Config.ID, order.OrderID)
 
 			// Balance was already adjusted when order was placed
@@ -1565,7 +1518,7 @@ func (s *MarketMakerService) handleFilled(inst *BotInstance, filledOrder *model.
 		inst.Config.ID, newlyFilled, inst.BaseCurrency, executedQty, previouslyFilled)
 
 	// Safety check: reject unreasonably large amounts (likely corrupted orders)
-	if newlyFilled > 1000000 {
+	if newlyFilled > util.MaxReasonableCoinAmount {
 		s.log.Errorf("Bot %d: Rejecting order fill - newlyFilled %.8f is unreasonably large (order likely corrupted)",
 			inst.Config.ID, newlyFilled)
 		inst.ActiveOrder = nil
@@ -1573,7 +1526,7 @@ func (s *MarketMakerService) handleFilled(inst *BotInstance, filledOrder *model.
 	}
 
 	// Safety check: reject unreasonably large prices
-	if filledOrder.Price > 1000000000 {
+	if filledOrder.Price > util.MaxReasonablePrice {
 		s.log.Errorf("Bot %d: Rejecting order fill - price %.2f is unreasonably large (order likely corrupted)",
 			inst.Config.ID, filledOrder.Price)
 		inst.ActiveOrder = nil
@@ -1584,7 +1537,7 @@ func (s *MarketMakerService) handleFilled(inst *BotInstance, filledOrder *model.
 	totalValue := newlyFilled * filledOrder.Price
 
 	// Safety check: reject unreasonably large total values
-	if totalValue > 10000000000 { // More than 10 billion IDR
+	if totalValue > util.MaxReasonableTotalValue {
 		s.log.Errorf("Bot %d: Rejecting order fill - total value %.2f is unreasonably large (order likely corrupted)",
 			inst.Config.ID, totalValue)
 		inst.ActiveOrder = nil
@@ -2307,48 +2260,15 @@ func (s *MarketMakerService) validateSellProfit(inst *BotInstance, sellPrice flo
 }
 
 // validateAndNormalizeBalances ensures balances are initialized and valid
+// Uses shared balance validation utility
 func (s *MarketMakerService) validateAndNormalizeBalances(inst *BotInstance) {
-	// Ensure balances map is initialized
-	if inst.Config.Balances == nil {
-		inst.Config.Balances = make(map[string]float64)
-		inst.Config.Balances["idr"] = inst.Config.InitialBalanceIDR
-		inst.Config.Balances[inst.BaseCurrency] = 0
-		s.log.Warnf("Bot %d: Balances map was nil, reinitialized", inst.Config.ID)
-	}
-
-	// Validate and normalize IDR balance
-	idrBalance := inst.Config.Balances["idr"]
-	if idrBalance < 0 {
-		idrBalance = 0
-		inst.Config.Balances["idr"] = 0
-		s.log.Warnf("Bot %d: IDR balance was negative, reset to 0", inst.Config.ID)
-	}
-
-	// Validate and normalize coin balance
-	coinBalance, exists := inst.Config.Balances[inst.BaseCurrency]
-	if !exists {
-		coinBalance = 0
-		inst.Config.Balances[inst.BaseCurrency] = 0
-	}
-	if coinBalance < 0 {
-		coinBalance = 0
-		inst.Config.Balances[inst.BaseCurrency] = 0
-		s.log.Warnf("Bot %d: %s balance was negative, reset to 0", inst.Config.ID, inst.BaseCurrency)
-	}
-
-	// Clean up floating point errors: if balance is extremely small (< 0.00000001), treat as 0
-	if coinBalance > 0 && coinBalance < 0.00000001 {
-		s.log.Debugf("Bot %d: Cleaning up tiny %s balance (%.18f) - setting to 0", inst.Config.ID, inst.BaseCurrency, coinBalance)
-		coinBalance = 0
-		inst.Config.Balances[inst.BaseCurrency] = 0
-	}
-
-	// Safety check: ensure coinBalance is reasonable (not corrupted)
-	if coinBalance > 1000000 {
-		s.log.Errorf("Bot %d: Coin balance is unreasonably large (%.8f), resetting to 0", inst.Config.ID, coinBalance)
-		coinBalance = 0
-		inst.Config.Balances[inst.BaseCurrency] = 0
-	}
+	requiredCurrencies := []string{"idr", inst.BaseCurrency}
+	inst.Config.Balances = util.ValidateAndNormalizeBalances(
+		inst.Config.Balances,
+		requiredCurrencies,
+		inst.Config.InitialBalanceIDR,
+		s.log,
+	)
 }
 
 // handleAPIError handles API errors consistently across Trade and CancelOrder calls
@@ -2367,14 +2287,14 @@ func (s *MarketMakerService) handleAPIError(inst *BotInstance, err error, operat
 	}
 
 	// Handle order not found errors (expected if order was already filled/cancelled)
-	if s.isOrderNotFoundError(err) {
+	if util.IsOrderNotFoundError(err) {
 		s.log.Infof("Bot %d: Order not found on exchange during %s - likely filled or cancelled, waiting for WebSocket confirmation",
 			inst.Config.ID, operation)
 		return false // Don't retry, wait for WebSocket
 	}
 
 	// Handle critical trading errors (API key or invalid pair)
-	if s.isCriticalTradingError(err) && !inst.Config.IsPaperTrading {
+	if util.IsCriticalTradingError(err) && !inst.Config.IsPaperTrading {
 		s.stopBotWithError(inst.Config.ID, inst.Config.UserID, fmt.Sprintf("Trading error during %s: %v", operation, err))
 		return false // Don't retry, bot stopped
 	}
@@ -2516,7 +2436,7 @@ func (s *MarketMakerService) isOnlySeller(inst *BotInstance, ticker market.Order
 	ourOrderVolume := inst.ActiveOrder.Amount // Coin amount
 
 	// If bestAskVolume is 0 or very small, it means our order is the only one at this price
-	if bestAskVolume < 0.00000001 {
+	if bestAskVolume < util.TinyBalanceThreshold {
 		s.log.Debugf("Bot %d: ✓ Best ask volume is 0 → our sell is the ONLY seller at best ask → no need to subtract tick",
 			inst.Config.ID)
 		return true
@@ -2621,7 +2541,7 @@ func (s *MarketMakerService) syncBalance(ctx context.Context, inst *BotInstance)
 		info, err := inst.TradeClient.GetInfo(ctx)
 		if err != nil {
 			// If critical trading error (API key) and live trading, stop the bot
-			if s.isCriticalTradingError(err) && !inst.Config.IsPaperTrading {
+			if util.IsCriticalTradingError(err) && !inst.Config.IsPaperTrading {
 				s.stopBotWithError(inst.Config.ID, inst.Config.UserID, fmt.Sprintf("Trading error: %v", err))
 			}
 			return fmt.Errorf("failed to fetch live balance: %w", err)
@@ -2710,11 +2630,11 @@ func (s *MarketMakerService) validateBotConfig(ctx context.Context, req *model.B
 	}
 
 	// Validate numeric parameters
-	if req.InitialBalanceIDR < 50000 {
-		return util.ErrBadRequest("Initial balance must be at least 50,000 IDR")
+	if req.InitialBalanceIDR < util.MinInitialBalanceIDR {
+		return util.ErrBadRequest(fmt.Sprintf("Initial balance must be at least %.0f IDR", util.MinInitialBalanceIDR))
 	}
-	if req.OrderSizeIDR < 10000 {
-		return util.ErrBadRequest("Order size must be at least 10,000 IDR")
+	if req.OrderSizeIDR < util.MinOrderValueIDR {
+		return util.ErrBadRequest(fmt.Sprintf("Order size must be at least %.0f IDR", util.MinOrderValueIDR))
 	}
 	if req.OrderSizeIDR > req.InitialBalanceIDR {
 		return util.ErrBadRequest("Order size cannot exceed initial balance")

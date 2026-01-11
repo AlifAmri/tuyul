@@ -6,6 +6,7 @@ import (
 
 // Position status constants
 const (
+	PositionStatusPending = "pending"  // Order placed, waiting for false pump check
 	PositionStatusBuying  = "buying"
 	PositionStatusOpen    = "open"
 	PositionStatusSelling = "selling"
@@ -29,8 +30,11 @@ type Position struct {
 	EntryQuantity        float64   `json:"entry_quantity"`
 	EntryAmountIDR       float64   `json:"entry_amount_idr"`
 	EntryOrderID         string    `json:"entry_order_id"` // Indodax ID
+	EntryOrderType       string    `json:"entry_order_type,omitempty"` // "market" or "limit"
 	EntryPumpScore       float64   `json:"entry_pump_score"`
+	EntryTrxCount1m      int       `json:"entry_trx_count_1m,omitempty"` // Transaction count at entry (1m)
 	EntryAt              time.Time `json:"entry_at"`
+	OrderPlacedAt        time.Time `json:"order_placed_at,omitempty"` // When buy order was placed
 
 	// Exit
 	InternalExitOrderID int64      `json:"internal_exit_order_id"`
@@ -43,6 +47,15 @@ type Position struct {
 	// Price tracking
 	HighestPrice float64 `json:"highest_price"`
 	LowestPrice  float64 `json:"lowest_price"`
+	
+	// ATH tracking (for target profit = 1%)
+	LastPriceCheck time.Time `json:"last_price_check,omitempty"` // Last 1-minute check
+	MinutesBelowATH int      `json:"minutes_below_ath,omitempty"` // Consecutive minutes below ATH
+	
+	// Exit confirmation tracking (2-minute confirmation for all exits)
+	ExitSignalReason string `json:"exit_signal_reason,omitempty"` // First exit signal reason
+	ExitSignalMinute  int    `json:"exit_signal_minute,omitempty"` // Minute when first signal detected
+	ExitConfirmCount  int    `json:"exit_confirm_count,omitempty"` // Consecutive confirmations (need 2)
 
 	// Profit
 	ProfitIDR     *float64 `json:"profit_idr,omitempty"`

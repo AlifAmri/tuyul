@@ -55,14 +55,89 @@ type GetInfoResponse struct {
 	Return *GetInfoReturn `json:"return"`
 }
 
+// BalanceValue is a custom type that can unmarshal both numbers and strings
+type BalanceValue string
+
+// UnmarshalJSON implements custom unmarshaling to handle both numbers and strings
+func (bv *BalanceValue) UnmarshalJSON(data []byte) error {
+	// Remove quotes if present (for string values)
+	dataStr := string(data)
+	if len(dataStr) > 0 && dataStr[0] == '"' && dataStr[len(dataStr)-1] == '"' {
+		// It's a JSON string, unmarshal as string
+		var str string
+		if err := json.Unmarshal(data, &str); err != nil {
+			return fmt.Errorf("failed to unmarshal string: %w", err)
+		}
+		*bv = BalanceValue(str)
+		return nil
+	}
+
+	// Try as number (int or float)
+	var num json.Number
+	if err := json.Unmarshal(data, &num); err == nil {
+		// Convert number to string with up to 8 decimal places
+		numStr := num.String()
+		*bv = BalanceValue(numStr)
+		return nil
+	}
+
+	// Try as float64 as fallback
+	var numFloat float64
+	if err := json.Unmarshal(data, &numFloat); err == nil {
+		*bv = BalanceValue(fmt.Sprintf("%.8f", numFloat))
+		return nil
+	}
+
+	return fmt.Errorf("cannot unmarshal %s into BalanceValue (not a string or number)", string(data))
+}
+
+// String returns the string representation
+func (bv BalanceValue) String() string {
+	return string(bv)
+}
+
+// UserIDValue is a custom type that can unmarshal both numbers and strings
+type UserIDValue string
+
+// UnmarshalJSON implements custom unmarshaling to handle both numbers and strings
+func (uv *UserIDValue) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		*uv = UserIDValue(str)
+		return nil
+	}
+
+	// If not a string, try as number
+	var num json.Number
+	if err := json.Unmarshal(data, &num); err == nil {
+		*uv = UserIDValue(num.String())
+		return nil
+	}
+
+	// Try as int64 as fallback
+	var numInt int64
+	if err := json.Unmarshal(data, &numInt); err == nil {
+		*uv = UserIDValue(fmt.Sprintf("%d", numInt))
+		return nil
+	}
+
+	return fmt.Errorf("cannot unmarshal %s into UserIDValue (not a string or number)", string(data))
+}
+
+// String returns the string representation
+func (uv UserIDValue) String() string {
+	return string(uv)
+}
+
 // GetInfoReturn represents the return data from getInfo
 type GetInfoReturn struct {
-	ServerTime  int64             `json:"server_time"`
-	Balance     map[string]string `json:"balance"`
-	BalanceHold map[string]string `json:"balance_hold"`
-	UserID      string            `json:"user_id"`
-	Name        string            `json:"name"`
-	Email       string            `json:"email"`
+	ServerTime  int64                   `json:"server_time"`
+	Balance     map[string]BalanceValue `json:"balance"`
+	BalanceHold map[string]BalanceValue `json:"balance_hold"`
+	UserID      UserIDValue             `json:"user_id"`
+	Name        string                  `json:"name"`
+	Email       string                  `json:"email"`
 }
 
 type TradeRequest struct {
@@ -138,11 +213,11 @@ type CancelOrderResponse struct {
 }
 
 type CancelOrderReturn struct {
-	OrderID       int64             `json:"order_id"`
-	ClientOrderID string            `json:"client_order_id"`
-	Type          string            `json:"type"`
-	Pair          string            `json:"pair"`
-	Balance       map[string]string `json:"balance,omitempty"`
+	OrderID       int64                    `json:"order_id"`
+	ClientOrderID string                   `json:"client_order_id"`
+	Type          string                   `json:"type"`
+	Pair          string                   `json:"pair"`
+	Balance       map[string]BalanceValue  `json:"balance,omitempty"`
 }
 
 // ... Public API Structs (Pair, PriceIncrements, etc.) ...
@@ -366,27 +441,63 @@ func (c *Client) Trade(ctx context.Context, key, secret string, req TradeRequest
 	params := url.Values{}
 	params.Set("pair", req.Pair)
 	params.Set("type", req.Type)
-	params.Set("price", fmt.Sprintf("%f", req.Price))
 
-	if req.IDR > 0 {
-		params.Set("idr", fmt.Sprintf("%f", req.IDR))
+	// Determine order type
+	orderType := req.OrderType
+	if orderType == "" {
+		orderType = "limit" // default is limit
 	}
-	// For coin parameter, Indodax often requires the specific coin code as key (e.g. 'btc')
-	// We need to parse the pair to find the coin code, or accept a param.
-	// Usually for pair "btcidr", the coin param key is "btc".
-	if req.Coin > 0 {
-		// naive extraction: split pair by underscore or take prefix if 'idr' suffix
+
+	// Price parameter: only for limit orders (not for market orders)
+	if orderType == "limit" && req.Price > 0 {
+		params.Set("price", fmt.Sprintf("%f", req.Price))
+	}
+
+	// Amount handling according to Indodax API:
+	// - Market BUY: use IDR amount (req.IDR)
+	// - Market SELL: use coin amount (req.Coin)
+	// - Limit BUY: use coin amount (req.Coin) OR IDR (req.IDR), but not both
+	// - Limit SELL: use coin amount (req.Coin)
+	if orderType == "market" {
+		if req.Type == "buy" {
+			// Market buy: use IDR amount
+			if req.IDR > 0 {
+				params.Set("idr", fmt.Sprintf("%f", req.IDR))
+			}
+		} else {
+			// Market sell: use coin amount
+			if req.Coin > 0 {
+				// Extract coin code from pair
+				coinKey := "btc" // default fallback
+				if strings.Contains(req.Pair, "_") {
+					parts := strings.Split(req.Pair, "_")
+					if len(parts) > 0 {
+						coinKey = parts[0]
+					}
+				} else if strings.HasSuffix(req.Pair, "idr") {
+					coinKey = strings.TrimSuffix(req.Pair, "idr")
+				}
+				params.Set(coinKey, fmt.Sprintf("%f", req.Coin))
+			}
+		}
+	} else {
+		// Limit order: use coin amount (preferred) or IDR for buy
+		if req.Coin > 0 {
+		// Limit order with coin amount - extract coin code from pair
 		coinKey := "btc" // default fallback
-		if strings.HasSuffix(req.Pair, "idr") {
-			coinKey = strings.TrimSuffix(req.Pair, "idr")
-		} else if strings.Contains(req.Pair, "_") {
+		if strings.Contains(req.Pair, "_") {
 			parts := strings.Split(req.Pair, "_")
 			if len(parts) > 0 {
 				coinKey = parts[0]
 			}
+		} else if strings.HasSuffix(req.Pair, "idr") {
+			coinKey = strings.TrimSuffix(req.Pair, "idr")
 		}
-		// override coin code if logic is complex - maybe map in future
 		params.Set(coinKey, fmt.Sprintf("%f", req.Coin))
+		} else if req.IDR > 0 && req.Type == "buy" {
+			// Limit buy order with IDR amount (fallback, but Indodax recommends coin amount)
+		params.Set("idr", fmt.Sprintf("%f", req.IDR))
+		}
 	}
 
 	if req.OrderType != "" {
@@ -449,7 +560,19 @@ func (c *Client) GetOrder(ctx context.Context, key, secret string, pair string, 
 	return &result.Return.Order, nil
 }
 
-// CancelOrder cancels an order
+// GetOrderByClientOrderID gets specific order details by Client Order ID
+func (c *Client) GetOrderByClientOrderID(ctx context.Context, key, secret string, clientOrderID string) (*OrderInfo, error) {
+	params := url.Values{}
+	params.Set("client_order_id", clientOrderID)
+
+	var result GetOrderResponse
+	if err := c.doPrivateRequest(ctx, "getOrderByClientOrderId", params, key, secret, &result); err != nil {
+		return nil, err
+	}
+	return &result.Return.Order, nil
+}
+
+// CancelOrder cancels an order by numeric order ID
 func (c *Client) CancelOrder(ctx context.Context, key, secret string, pair string, orderID int64, typeStr string) (*CancelOrderReturn, error) {
 	params := url.Values{}
 	params.Set("pair", pair)
@@ -458,6 +581,20 @@ func (c *Client) CancelOrder(ctx context.Context, key, secret string, pair strin
 
 	var result CancelOrderResponse
 	if err := c.doPrivateRequest(ctx, "cancelOrder", params, key, secret, &result); err != nil {
+		return nil, err
+	}
+	return result.Return, nil
+}
+
+// CancelByClientOrderID cancels an order by client order ID
+func (c *Client) CancelByClientOrderID(ctx context.Context, key, secret string, pair string, clientOrderID string, typeStr string) (*CancelOrderReturn, error) {
+	params := url.Values{}
+	params.Set("pair", pair)
+	params.Set("client_order_id", clientOrderID)
+	params.Set("type", typeStr) // buy or sell
+
+	var result CancelOrderResponse
+	if err := c.doPrivateRequest(ctx, "cancelByClientOrderId", params, key, secret, &result); err != nil {
 		return nil, err
 	}
 	return result.Return, nil
@@ -516,7 +653,18 @@ func (c *Client) GeneratePrivateWSToken(ctx context.Context, key, secret string)
 	}
 
 	if result.Success != 1 || result.Return == nil {
-		return nil, fmt.Errorf("failed to generate token: %s", result.Error)
+		errorMsg := result.Error
+		if errorMsg == "" {
+			errorMsg = "unknown error"
+		}
+		return nil, fmt.Errorf("failed to generate token: %s", errorMsg)
+	}
+
+	if result.Return.ConnToken == "" {
+		return nil, fmt.Errorf("generated token is empty")
+	}
+	if result.Return.Channel == "" {
+		return nil, fmt.Errorf("generated channel is empty")
 	}
 
 	return result.Return, nil
@@ -654,5 +802,3 @@ func (c *Client) GetDepth(ctx context.Context, pairID string) (*DepthResponse, e
 	}
 	return &depth, nil
 }
-
-

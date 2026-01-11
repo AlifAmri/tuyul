@@ -3,6 +3,7 @@ package util
 import (
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // AppError represents an application error with HTTP status code
@@ -120,3 +121,41 @@ func GetAppError(err error) *AppError {
 	return nil
 }
 
+// IsAPIKeyError checks if an error is related to API key issues
+func IsAPIKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "api key") ||
+		strings.Contains(errStr, "invalid credentials") ||
+		strings.Contains(errStr, "bad sign") ||
+		strings.Contains(errStr, ErrCodeAPIKeyInvalid) ||
+		strings.Contains(errStr, "api_key_invalid")
+}
+
+// IsCriticalTradingError checks if an error is critical and should stop the bot
+func IsCriticalTradingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	// API key errors
+	if IsAPIKeyError(err) {
+		return true
+	}
+	// Invalid pair - configuration issue that prevents trading
+	if strings.Contains(errStr, "invalid pair") {
+		return true
+	}
+	return false
+}
+
+// IsOrderNotFoundError checks if an error is "Order not found" (non-critical, order already filled/cancelled)
+func IsOrderNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "order not found")
+}

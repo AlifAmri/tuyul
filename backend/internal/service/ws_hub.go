@@ -232,7 +232,7 @@ func (h *WSHub) StartPubSubListener(ctx context.Context) {
 	// Forward user pattern messages
 	go func() {
 		ch := userPubsub.Channel()
-		for msg := range ch {
+	for msg := range ch {
 			msgChan <- pubSubMessage{channel: msg.Channel, payload: msg.Payload}
 		}
 	}()
@@ -260,10 +260,10 @@ func (h *WSHub) StartPubSubListener(ctx context.Context) {
 			// Extract userID from channel name (e.g., "ws:user:123" -> "123")
 			if len(msg.channel) > len(userPrefix) && msg.channel[:len(userPrefix)] == userPrefix {
 				userID := msg.channel[len(userPrefix):]
-				var wsMsg model.WSMessage
+			var wsMsg model.WSMessage
 				if err := json.Unmarshal([]byte(msg.payload), &wsMsg); err == nil {
 					h.log.Debugf("WS Sending message type %s to user: %s", wsMsg.Type, userID)
-					h.SendToUser(userID, wsMsg)
+				h.SendToUser(userID, wsMsg)
 				} else {
 					h.log.Errorf("WS Failed to unmarshal user message for %s: %v", userID, err)
 				}

@@ -110,7 +110,7 @@ func (c *WSClient) SetErrorHandler(handler func(err error)) {
 // Connect connects to the WebSocket server
 func (c *WSClient) Connect() error {
 	c.mu.Lock()
-	
+
 	// If already connected, return immediately
 	if c.isConnected {
 		c.mu.Unlock()
@@ -262,7 +262,7 @@ func (c *WSClient) readPump() {
 					logger.Infof("Connection marked as stale, will reconnect")
 				}
 			} else {
-				logger.Errorf("WS ReadMessage error for %s: %v", c.url, err)
+			logger.Errorf("WS ReadMessage error for %s: %v", c.url, err)
 			}
 			
 			c.mu.Lock()

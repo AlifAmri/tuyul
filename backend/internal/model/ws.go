@@ -4,14 +4,15 @@ package model
 type WSMessageType string
 
 const (
-	MessageTypeMarketUpdate  WSMessageType = "market_update"
-	MessageTypeOrderUpdate   WSMessageType = "order_update"
-	MessageTypeBotUpdate     WSMessageType = "bot_update"
-	MessageTypeBalanceUpdate WSMessageType = "balance_update"
-	MessageTypePumpSignal    WSMessageType = "pump_signal"
-	MessageTypeError         WSMessageType = "error"
-	MessageTypeAuthSuccess   WSMessageType = "auth_success"
-	MessageTypePong          WSMessageType = "pong"
+	MessageTypeMarketUpdate   WSMessageType = "market_update"
+	MessageTypeOrderUpdate    WSMessageType = "order_update"
+	MessageTypeBotUpdate      WSMessageType = "bot_update"
+	MessageTypePositionUpdate WSMessageType = "position_update"
+	MessageTypeBalanceUpdate  WSMessageType = "balance_update"
+	MessageTypePumpSignal     WSMessageType = "pump_signal"
+	MessageTypeError          WSMessageType = "error"
+	MessageTypeAuthSuccess    WSMessageType = "auth_success"
+	MessageTypePong           WSMessageType = "pong"
 )
 
 // WSMessage is the envelope for all WebSocket messages
@@ -35,4 +36,8 @@ type WSBotUpdatePayload struct {
 	TotalProfitIDR float64            `json:"total_profit_idr"`
 	EquityIDR      float64            `json:"equity_idr"`
 	Balances       map[string]float64 `json:"balances,omitempty"` // Real-time balance updates
+	// Market data (for Market Maker bots)
+	BuyPrice      float64 `json:"buy_price,omitempty"`      // Current bid price
+	SellPrice     float64 `json:"sell_price,omitempty"`     // Current ask price
+	SpreadPercent float64 `json:"spread_percent,omitempty"` // Current spread percentage
 }

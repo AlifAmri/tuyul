@@ -30,15 +30,18 @@ type Config struct {
 // New creates a new Redis client
 func New(cfg Config) (*Client, error) {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:         fmt.Sprintf("%s:%s", cfg.Host, cfg.Port),
-		Password:     cfg.Password,
-		DB:           cfg.DB,
-		PoolSize:     10,
-		MinIdleConns: 5,
-		MaxRetries:   3,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
+		Addr:            fmt.Sprintf("%s:%s", cfg.Host, cfg.Port),
+		Password:        cfg.Password,
+		DB:              cfg.DB,
+		PoolSize:        50,              // Increased from 10 to handle concurrent operations
+		MinIdleConns:    20,              // Increased from 5 to keep more connections ready
+		MaxRetries:      3,
+		DialTimeout:     5 * time.Second,
+		ReadTimeout:     3 * time.Second,
+		WriteTimeout:    3 * time.Second,
+		PoolTimeout:     10 * time.Second, // Wait up to 10s for a connection from pool
+		ConnMaxIdleTime: 5 * time.Minute,  // Close idle connections after 5 minutes
+		ConnMaxLifetime: 30 * time.Minute, // Close connections after 30 minutes (refresh)
 	})
 
 	// Test connection

@@ -201,6 +201,35 @@ func (h *BotHandler) GetBotSummary(c *gin.Context) {
 		summary.Uptime = time.Since(bot.UpdatedAt).String()
 	}
 
+	// Get current market prices (bid/ask) and spread
+	// For Market Maker bots: try to get from running instance first, then fallback to market data
+	if bot.Type == model.BotTypeMarketMaker && bot.Pair != "" {
+		var buyPrice, sellPrice float64
+
+		// Try to get from running bot instance (most up-to-date)
+		if inst := h.mmService.GetBotInstance(bot.ID); inst != nil && inst.CurrentBid > 0 && inst.CurrentAsk > 0 {
+			buyPrice = inst.CurrentBid
+			sellPrice = inst.CurrentAsk
+		} else {
+			// Fallback to market data service
+			marketDataService := h.mmService.GetMarketDataService()
+			if marketDataService != nil {
+				coin, err := marketDataService.GetCoin(c.Request.Context(), bot.Pair)
+				if err == nil && coin != nil {
+					buyPrice = coin.BestBid
+					sellPrice = coin.BestAsk
+				}
+			}
+		}
+
+		if buyPrice > 0 && sellPrice > 0 {
+			summary.BuyPrice = buyPrice
+			summary.SellPrice = sellPrice
+			// Calculate spread percentage: (ask - bid) / bid * 100
+			summary.SpreadPercent = (sellPrice - buyPrice) / buyPrice * 100
+		}
+	}
+
 	util.SendSuccess(c, summary)
 }
 
@@ -269,12 +298,15 @@ func (h *BotHandler) StartBot(c *gin.Context) {
 		return
 	}
 
+	// Call StartBot synchronously - it's designed to be fast (stores instance and starts goroutine)
+	// The actual bot loop runs in a goroutine inside StartBot
+	ctx := context.Background()
 	var startErr error
 	switch bot.Type {
 	case model.BotTypeMarketMaker:
-		startErr = h.mmService.StartBot(c.Request.Context(), userID.(string), id)
+		startErr = h.mmService.StartBot(ctx, userID.(string), id)
 	case model.BotTypePumpHunter:
-		startErr = h.phService.StartBot(c.Request.Context(), userID.(string), id)
+		startErr = h.phService.StartBot(ctx, userID.(string), id)
 	default:
 		startErr = util.ErrBadRequest("Unsupported bot type")
 	}
@@ -308,12 +340,21 @@ func (h *BotHandler) StopBot(c *gin.Context) {
 		return
 	}
 
+	// Verify user owns the bot
+	if bot.UserID != userID.(string) {
+		util.SendError(c, util.ErrForbidden("Access denied"))
+		return
+	}
+
+	// Call StopBot synchronously - it's designed to be fast (closes StopChan immediately)
+	// Only order cancellation happens asynchronously inside StopBot
+	ctx := context.Background()
 	var stopErr error
 	switch bot.Type {
 	case model.BotTypeMarketMaker:
-		stopErr = h.mmService.StopBot(c.Request.Context(), userID.(string), id)
+		stopErr = h.mmService.StopBot(ctx, userID.(string), id)
 	case model.BotTypePumpHunter:
-		stopErr = h.phService.StopBot(c.Request.Context(), userID.(string), id)
+		stopErr = h.phService.StopBot(ctx, userID.(string), id)
 	default:
 		stopErr = util.ErrBadRequest("Unsupported bot type")
 	}
@@ -322,6 +363,7 @@ func (h *BotHandler) StopBot(c *gin.Context) {
 		util.SendError(c, stopErr)
 		return
 	}
+
 	util.SendSuccess(c, gin.H{"message": "Bot stopped successfully"})
 }
 
@@ -392,8 +434,8 @@ func (h *BotHandler) ListOrders(c *gin.Context) {
 	var orders []*model.Order
 
 	if bot.Type == model.BotTypeMarketMaker {
-		// Direct bot orders - fetch only 10 most recent
-		orders, err = h.orderRepo.ListByParentAndUser(c.Request.Context(), userID.(string), "bot", id, 10)
+		// Direct bot orders - fetch 50 most recent (to ensure we see partial/filled orders even with many cancelled)
+		orders, err = h.orderRepo.ListByParentAndUser(c.Request.Context(), userID.(string), "bot", id, 50)
 	} else if bot.Type == model.BotTypePumpHunter {
 		// Get all positions for this bot first
 		positions, err := h.phService.ListPositions(c.Request.Context(), userID.(string), id)
@@ -410,12 +452,12 @@ func (h *BotHandler) ListOrders(c *gin.Context) {
 			redisClient := h.orderRepo.GetRedisClient().GetClient()
 			pipe := redisClient.Pipeline()
 			cmds := make(map[int64]*redislib.StringSliceCmd)
-			
+
 			for _, pos := range positions {
 				posOrdersKey := redis.PositionOrdersKey(pos.ID)
 				cmds[pos.ID] = pipe.ZRevRange(ctx, posOrdersKey, 0, 9) // Get top 10 from each position
 			}
-			
+
 			_, err = pipe.Exec(ctx)
 			if err != nil && err != redislib.Nil {
 				util.SendError(c, err)
@@ -428,11 +470,11 @@ func (h *BotHandler) ListOrders(c *gin.Context) {
 				ts      float64
 			}
 			allOrderIDs := make([]orderIDWithTS, 0)
-			
+
 			// Use another pipeline to get scores
 			pipe2 := redisClient.Pipeline()
 			scoreCmds := make(map[string]*redislib.FloatCmd)
-			
+
 			for posID, cmd := range cmds {
 				orderIDs, err := cmd.Result()
 				if err == nil {
@@ -443,7 +485,7 @@ func (h *BotHandler) ListOrders(c *gin.Context) {
 					}
 				}
 			}
-			
+
 			_, err = pipe2.Exec(ctx)
 			if err != nil && err != redislib.Nil {
 				// Fallback to simpler method
@@ -516,7 +558,7 @@ func (h *BotHandler) ListOrders(c *gin.Context) {
 					orderKey := redis.OrderKey(oid.orderID)
 					orderCmds[oid.orderID] = pipe.Get(ctx, orderKey)
 				}
-				
+
 				_, err = pipe.Exec(ctx)
 				if err != nil && err != redislib.Nil {
 					util.SendError(c, err)
@@ -547,22 +589,30 @@ func (h *BotHandler) ListOrders(c *gin.Context) {
 		return
 	}
 
-	// Sort orders by most recent first (by CreatedAt, then by ID as fallback)
-	// Then limit to 10 most recent orders
-	if len(orders) > 0 {
-		// Sort by CreatedAt descending (most recent first), then by ID descending
-		sort.Slice(orders, func(i, j int) bool {
-			if orders[i].CreatedAt.Equal(orders[j].CreatedAt) {
-				return orders[i].ID > orders[j].ID
-			}
-			return orders[i].CreatedAt.After(orders[j].CreatedAt)
-		})
-		
-		// Limit to 10
-		if len(orders) > 10 {
-			orders = orders[:10]
+	// Filter out cancelled orders
+	filteredOrders := make([]*model.Order, 0, len(orders))
+	for _, order := range orders {
+		if order.Status != "cancelled" {
+			filteredOrders = append(filteredOrders, order)
 		}
 	}
 
-	util.SendSuccess(c, orders)
+	// Sort orders by most recent first (by CreatedAt, then by ID as fallback)
+	// Then limit to 20 most recent orders (after filtering out cancelled)
+	if len(filteredOrders) > 0 {
+		// Sort by CreatedAt descending (most recent first), then by ID descending
+		sort.Slice(filteredOrders, func(i, j int) bool {
+			if filteredOrders[i].CreatedAt.Equal(filteredOrders[j].CreatedAt) {
+				return filteredOrders[i].ID > filteredOrders[j].ID
+			}
+			return filteredOrders[i].CreatedAt.After(filteredOrders[j].CreatedAt)
+		})
+
+		// Limit to 20 (to show more history including partial/filled orders)
+		if len(filteredOrders) > 20 {
+			filteredOrders = filteredOrders[:20]
+		}
+	}
+
+	util.SendSuccess(c, filteredOrders)
 }

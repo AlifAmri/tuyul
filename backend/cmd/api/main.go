@@ -131,7 +131,10 @@ func main() {
 	timeframeManager.Start()
 
 	// Initialize Order Monitor
-	orderMonitor := service.NewOrderMonitor(tradeRepo, orderRepo, apiKeyService, notificationService, indodaxClient)
+	orderMonitor := service.NewOrderMonitor(tradeRepo, orderRepo, apiKeyRepo, apiKeyService, notificationService, indodaxClient)
+	
+	// Set orderMonitor in APIKeyService to enable subscription on API key create/update
+	apiKeyService.SetOrderMonitor(orderMonitor)
 
 	// Initialize Copilot service
 	copilotService := service.NewCopilotService(tradeRepo, orderRepo, balanceRepo, apiKeyService, marketDataService, orderMonitor, indodaxClient)
@@ -144,9 +147,14 @@ func main() {
 
 	botHandler := handler.NewBotHandler(botRepo, orderRepo, mmService, phService)
 
-	// Register Pump Signal Notifications
+	// Note: Pump Hunter coin update handler is already registered in phService constructor
+	// Register Market Update and Pump Signal Notifications
 	marketDataService.OnUpdate(func(coin *model.Coin) {
-		if coin.PumpScore >= 75 {
+		// Always broadcast market_update for all coin updates (price changes, timeframe resets, gap updates)
+		notificationService.NotifyMarketUpdate(context.Background(), coin)
+
+		// Only broadcast pump_signal for very high pump scores (>= 1000)
+		if coin.PumpScore >= 1000 {
 			notificationService.NotifyPumpSignal(context.Background(), coin)
 		}
 	})
@@ -183,27 +191,27 @@ func main() {
 	go func() {
 		ctx := context.Background()
 		log.Info("Restoring running bots after server restart...")
-		
+
 		// Get all running bots
 		runningBots, err := botRepo.ListByStatus(ctx, model.BotStatusRunning)
 		if err != nil {
 			log.Errorf("Failed to list running bots: %v", err)
 			return
 		}
-		
+
 		log.Infof("Found %d running bot(s) to restore", len(runningBots))
-		
+
 		for _, bot := range runningBots {
-			log.Infof("Restoring bot %d (Type: %s, Pair: %s, User: %s)", 
+			log.Infof("Restoring bot %d (Type: %s, Pair: %s, User: %s)",
 				bot.ID, bot.Type, bot.Pair, bot.UserID)
-			
+
 			// Temporarily set status to stopped so StartBot can proceed
 			// (StartBot checks if status is already running and returns error)
 			if err := botRepo.UpdateStatus(ctx, bot.ID, model.BotStatusStopped, nil); err != nil {
 				log.Errorf("Failed to reset status for bot %d: %v", bot.ID, err)
 				continue
 			}
-			
+
 			var err error
 			if bot.Type == model.BotTypeMarketMaker {
 				err = mmService.StartBot(ctx, bot.UserID, bot.ID)
@@ -215,7 +223,7 @@ func main() {
 				botRepo.UpdateStatus(ctx, bot.ID, model.BotStatusRunning, nil)
 				continue
 			}
-			
+
 			if err != nil {
 				log.Errorf("Failed to restore bot %d: %v", bot.ID, err)
 				// Status is already stopped from above, so we're good
@@ -223,12 +231,12 @@ func main() {
 				log.Infof("Successfully restored bot %d", bot.ID)
 			}
 		}
-		
+
 		log.Info("Finished restoring running bots")
 	}()
 
 	// Initialize handlers
-	authHandler := handler.NewAuthHandler(authService)
+	authHandler := handler.NewAuthHandler(authService, apiKeyService)
 	userHandler := handler.NewUserHandler(userService)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	marketHandler := handler.NewMarketHandler(marketDataService)
@@ -369,6 +377,18 @@ func main() {
 	}()
 
 	log.Info("✓ Server started successfully")
+
+	// Subscribe to order updates for all users with API keys (on boot)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		
+		if err := orderMonitor.SubscribeAllUsersWithAPIKeys(ctx); err != nil {
+			log.Errorf("Failed to subscribe all users with API keys: %v", err)
+		} else {
+			log.Info("✓ Subscribed to order updates for all users with API keys")
+		}
+	}()
 
 	// Wait for interrupt signal to gracefully shutdown the server
 	quit := make(chan os.Signal, 1)

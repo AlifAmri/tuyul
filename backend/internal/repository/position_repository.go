@@ -4,6 +4,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -102,7 +103,7 @@ func (r *PositionRepository) Update(ctx context.Context, pos *model.Position) er
 	return nil
 }
 
-// ListByBot retrieves all positions for a bot
+// ListByBot retrieves all positions for a bot, sorted by most recent first
 func (r *PositionRepository) ListByBot(ctx context.Context, botID int64) ([]*model.Position, error) {
 	botPositionsKey := redis.BotPositionsKey(strconv.FormatInt(botID, 10))
 
@@ -119,6 +120,11 @@ func (r *PositionRepository) ListByBot(ctx context.Context, botID int64) ([]*mod
 			positions = append(positions, pos)
 		}
 	}
+
+	// Sort by CreatedAt descending (most recent first)
+	sort.Slice(positions, func(i, j int) bool {
+		return positions[i].CreatedAt.After(positions[j].CreatedAt)
+	})
 
 	return positions, nil
 }

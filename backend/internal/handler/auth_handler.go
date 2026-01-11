@@ -10,13 +10,15 @@ import (
 
 // AuthHandler handles authentication endpoints
 type AuthHandler struct {
-	authService *service.AuthService
+	authService  *service.AuthService
+	apiKeyService *service.APIKeyService
 }
 
 // NewAuthHandler creates a new auth handler
-func NewAuthHandler(authService *service.AuthService) *AuthHandler {
+func NewAuthHandler(authService *service.AuthService, apiKeyService *service.APIKeyService) *AuthHandler {
 	return &AuthHandler{
-		authService: authService,
+		authService:  authService,
+		apiKeyService: apiKeyService,
 	}
 }
 
@@ -103,6 +105,12 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	util.SendSuccessWithMessage(c, nil, "Logged out successfully")
 }
 
+// GetMeResponse represents the response for /auth/me endpoint
+type GetMeResponse struct {
+	*model.SafeUser
+	APIKey *model.APIKeyResponse `json:"api_key,omitempty"`
+}
+
 // GetMe returns current user info
 // GET /api/v1/auth/me
 func (h *AuthHandler) GetMe(c *gin.Context) {
@@ -114,7 +122,20 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		return
 	}
 
-	util.SendSuccess(c, user)
+	// Get API key if exists
+	var apiKey *model.APIKeyResponse
+	apiKeyData, err := h.apiKeyService.Get(c.Request.Context(), userID.(string))
+	if err == nil {
+		apiKey = apiKeyData
+	}
+	// If API key doesn't exist, apiKey will be nil (which is fine)
+
+	response := &GetMeResponse{
+		SafeUser: user,
+		APIKey:   apiKey,
+	}
+
+	util.SendSuccess(c, response)
 }
 
 
