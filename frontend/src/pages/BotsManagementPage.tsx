@@ -3,25 +3,27 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { botService } from '@/api/services/bot';
 import { useAuthStore } from '@/stores/authStore';
-import { BotConfig, BotType, BotConfigRequest, Order } from '@/types/bot';
+import { useMarketStore } from '@/stores/marketStore';
+import { BotConfig, BotType, BotConfigRequest, Order, Position, BotSummary } from '@/types/bot';
 import { formatIDR, formatNumber, formatPercent } from '@/utils/formatters';
 import { cn } from '@/utils/cn';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { NoBotsEmptyState } from '@/components/common/EmptyState';
 import { AlertModal } from '@/components/common/AlertModal';
 import { useWebSocket } from '@/contexts/WebSocketContext';
-import { WebSocketMessage } from '@/types/websocket';
+import { WebSocketMessage, PositionUpdateMessage, PositionOpenMessage, PositionCloseMessage } from '@/types/websocket';
 import { AxiosError } from 'axios';
 
 export default function BotsManagementPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { lastMessage } = useWebSocket();
+  const { getCoin, coins: marketCoins } = useMarketStore();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedBot, setSelectedBot] = useState<BotConfig | null>(null);
   const [showCreateWizard, setShowCreateWizard] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  const [botType, setBotType] = useState<BotType>('market_maker');
+  const [botType, setBotType] = useState<BotType>('pump_hunter');
   const [createError, setCreateError] = useState<string>('');
   const [isPairPreFilled, setIsPairPreFilled] = useState(false);
   const [isBotTypeDisabled, setIsBotTypeDisabled] = useState(false);
@@ -59,7 +61,7 @@ export default function BotsManagementPage() {
   // Form state for bot creation
   const [formData, setFormData] = useState<BotConfigRequest>({
     name: '',
-    type: 'market_maker',
+    type: 'pump_hunter',
     pair: '',
     is_paper_trading: true,
     initial_balance_idr: 1000000,
@@ -290,16 +292,42 @@ export default function BotsManagementPage() {
     setOpenedFromGaps(false);
     setFormData({
       name: '',
-      type: 'market_maker',
+      type: 'pump_hunter',
       pair: '',
       is_paper_trading: true,
       initial_balance_idr: 1000000,
+      // Market Maker fields
       order_size_idr: 100000,
       min_gap_percent: 0.5,
       reposition_threshold_percent: 0.1,
       max_loss_idr: 500000,
+      // Pump Hunter fields
+      entry_rules: {
+        min_pump_score: 50.0,
+        min_timeframes_positive: 2,
+        min_24h_volume_idr: 1000000000,
+        min_price_idr: 100,
+        excluded_pairs: ['usdtidr', 'usdcidr', 'adaidr', 'daidr', 'busdidr', 'tusdidr'],
+        allowed_pairs: [],
+      },
+      exit_rules: {
+        target_profit_percent: 3.0,
+        stop_loss_percent: 1.5,
+        trailing_stop_enabled: true,
+        trailing_stop_percent: 1.0,
+        max_hold_minutes: 30,
+        exit_on_pump_score_drop: true,
+        pump_score_drop_threshold: 20.0,
+      },
+      risk_management: {
+        max_position_idr: 500000,
+        max_concurrent_positions: 3,
+        daily_loss_limit_idr: 1000000,
+        cooldown_after_loss_minutes: 10,
+        min_balance_idr: 100000,
+      },
     });
-    setBotType('market_maker');
+    setBotType('pump_hunter');
   };
 
   const handleCloseModal = () => {
@@ -316,18 +344,74 @@ export default function BotsManagementPage() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    // For Pump Hunter, set pair to empty string since it scans all pairs
-    const submitData = {
-      ...formData,
-      pair: formData.type === 'pump_hunter' ? '' : formData.pair,
-    };
-    
-    createBotMutation.mutate(submitData);
+    // Build submit data based on bot type
+    if (formData.type === 'pump_hunter') {
+      // Pump Hunter: send entry_rules, exit_rules, risk_management, and initial_balance_idr
+      const submitData: BotConfigRequest = {
+        name: formData.name,
+        type: 'pump_hunter',
+        pair: '', // Pump Hunter scans all pairs
+        is_paper_trading: formData.is_paper_trading,
+        api_key_id: formData.api_key_id,
+        initial_balance_idr: formData.initial_balance_idr,
+        entry_rules: formData.entry_rules,
+        exit_rules: formData.exit_rules,
+        risk_management: formData.risk_management,
+      };
+      createBotMutation.mutate(submitData);
+    } else {
+      // Market Maker: send Market Maker specific fields
+      const submitData: BotConfigRequest = {
+        name: formData.name,
+        type: 'market_maker',
+        pair: formData.pair,
+        is_paper_trading: formData.is_paper_trading,
+        api_key_id: formData.api_key_id,
+        initial_balance_idr: formData.initial_balance_idr,
+        order_size_idr: formData.order_size_idr,
+        min_gap_percent: formData.min_gap_percent,
+        reposition_threshold_percent: formData.reposition_threshold_percent,
+        max_loss_idr: formData.max_loss_idr,
+      };
+      createBotMutation.mutate(submitData);
+    }
   };
 
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedBot) {
+      // Validate Pump Hunter risk management fields
+      if (editFormData.type === 'pump_hunter' && editFormData.risk_management) {
+        const risk = editFormData.risk_management;
+        if (!risk.max_position_idr || risk.max_position_idr <= 0) {
+          setAlertModal({
+            open: true,
+            title: 'Validation Error',
+            message: 'Max Position Size (IDR) must be greater than 0',
+            type: 'error',
+          });
+          return;
+        }
+        if (!risk.daily_loss_limit_idr || risk.daily_loss_limit_idr <= 0) {
+          setAlertModal({
+            open: true,
+            title: 'Validation Error',
+            message: 'Daily Loss Limit (IDR) must be greater than 0',
+            type: 'error',
+          });
+          return;
+        }
+        if (!risk.min_balance_idr || risk.min_balance_idr <= 0) {
+          setAlertModal({
+            open: true,
+            title: 'Validation Error',
+            message: 'Min Balance (IDR) must be greater than 0',
+            type: 'error',
+          });
+          return;
+        }
+      }
+      
       // For Pump Hunter, set pair to empty string since it scans all pairs
       const submitData = {
         ...editFormData,
@@ -467,16 +551,124 @@ export default function BotsManagementPage() {
         break;
       }
 
-      case 'position_update':
-      case 'position_open':
-      case 'position_close':
-        // Invalidate positions query for the affected bot (WebSocket doesn't send full position list)
-        // Bot stats will be updated via bot_update message, so no need to invalidate bots here
-        // Orders are updated via order_update messages, so no need to invalidate orders here
-        if (message.bot_id) {
-          queryClient.invalidateQueries({ queryKey: ['bot-positions', message.bot_id] });
+      case 'position_update': {
+        // Update positions cache directly using position ID (no HTTP refetch)
+        const positionPayload = message.payload as Position;
+        const botId = message.bot_id || positionPayload?.bot_config_id || positionPayload?.bot_id;
+        
+        if (botId && positionPayload && positionPayload.id) {
+          queryClient.setQueryData(['bot-positions', botId], (oldData: { positions: Position[] } | Position[] | null | undefined) => {
+            // Handle both response format { positions: Position[] } and array format Position[]
+            const positionsArray = Array.isArray(oldData) ? oldData : oldData?.positions || [];
+            
+            // Check if position already exists (match by id)
+            const existingIndex = positionsArray.findIndex((p) => p.id === positionPayload.id);
+            
+            if (existingIndex >= 0) {
+              // Update existing position - merge to preserve any fields not in the update
+              const updated = [...positionsArray];
+              updated[existingIndex] = {
+                ...updated[existingIndex],
+                ...positionPayload,
+              };
+              
+              // Return in the same format as received
+              return Array.isArray(oldData) ? updated : { positions: updated };
+            } else {
+              // Create new position - add to the list
+              const updated = [...positionsArray, positionPayload];
+              
+              // Return in the same format as received
+              return Array.isArray(oldData) ? updated : { positions: updated };
+            }
+          });
         }
         break;
+      }
+      
+      case 'position_open': {
+        // Handle position_open message (same as position_update but with different structure)
+        const positionPayload = (message as PositionOpenMessage).data as Position;
+        const botId = message.bot_id || positionPayload?.bot_config_id || positionPayload?.bot_id;
+        
+        if (botId && positionPayload && positionPayload.id) {
+          queryClient.setQueryData(['bot-positions', botId], (oldData: { positions: Position[] } | Position[] | null | undefined) => {
+            const positionsArray = Array.isArray(oldData) ? oldData : oldData?.positions || [];
+            
+            // Check if position already exists
+            const existingIndex = positionsArray.findIndex((p) => p.id === positionPayload.id);
+            
+            if (existingIndex >= 0) {
+              // Update existing position
+              const updated = [...positionsArray];
+              updated[existingIndex] = {
+                ...updated[existingIndex],
+                ...positionPayload,
+              };
+              return Array.isArray(oldData) ? updated : { positions: updated };
+            } else {
+              // Create new position
+              const updated = [...positionsArray, positionPayload];
+              return Array.isArray(oldData) ? updated : { positions: updated };
+            }
+          });
+        }
+        break;
+      }
+      
+      case 'position_close': {
+        // Handle position_close message
+        const closePayload = (message as PositionCloseMessage).data;
+        const positionPayload = closePayload?.position as Position;
+        const botId = message.bot_id || positionPayload?.bot_config_id || positionPayload?.bot_id;
+        
+        if (botId && positionPayload && positionPayload.id) {
+          queryClient.setQueryData(['bot-positions', botId], (oldData: { positions: Position[] } | Position[] | null | undefined) => {
+            const positionsArray = Array.isArray(oldData) ? oldData : oldData?.positions || [];
+            
+            // Update the closed position
+            const existingIndex = positionsArray.findIndex((p) => p.id === positionPayload.id);
+            
+            if (existingIndex >= 0) {
+              const updated = [...positionsArray];
+              updated[existingIndex] = {
+                ...updated[existingIndex],
+                ...positionPayload,
+                status: 'closed' as const,
+              };
+              return Array.isArray(oldData) ? updated : { positions: updated };
+            } else {
+              // If position doesn't exist, add it (shouldn't happen, but handle gracefully)
+              const updated = [...positionsArray, { ...positionPayload, status: 'closed' as const }];
+              return Array.isArray(oldData) ? updated : { positions: updated };
+            }
+          });
+          
+          // Also update bot stats if summary is provided
+          if (closePayload?.summary) {
+            queryClient.setQueryData(['bots'], (oldData: { bots: BotConfig[]; count: number } | undefined) => {
+              if (!oldData?.bots) return oldData;
+              
+              return {
+                ...oldData,
+                bots: oldData.bots.map((bot) => {
+                  if (bot.id === botId) {
+                    return {
+                      ...bot,
+                      total_trades: closePayload.summary.total_trades,
+                      winning_trades: closePayload.summary.winning_trades,
+                      total_profit_idr: closePayload.summary.total_profit_idr,
+                      win_rate: closePayload.summary.win_rate,
+                    };
+                  }
+                  return bot;
+                }),
+              };
+            });
+          }
+        }
+        break;
+      }
 
       case 'order_update': {
         // Update cache directly instead of invalidating (no HTTP refetch)
@@ -580,6 +772,7 @@ export default function BotsManagementPage() {
           </div>
         ) : !bots || !bots.bots || bots.bots.length === 0 ? (
           <NoBotsEmptyState onCreate={() => {
+            resetForm();
             setShowCreateWizard(true);
             setCreateError('');
           }} />
@@ -590,6 +783,7 @@ export default function BotsManagementPage() {
               {/* Summon Helper Button */}
               <button
                 onClick={() => {
+                  resetForm();
                   setShowCreateWizard(true);
                   setCreateError('');
                 }}
@@ -673,8 +867,12 @@ export default function BotsManagementPage() {
                           <h2 className="text-2xl font-bold text-white mb-1">{selectedBot.name}</h2>
                           <div className="flex items-center gap-3">
                             <span className="text-gray-400">{getBotTypeBadge(selectedBot.type)}</span>
-                            <span className="text-gray-600">•</span>
-                            <span className="text-white font-medium">{selectedBot.pair.toUpperCase()}</span>
+                            {selectedBot.type === 'market_maker' && selectedBot.pair && (
+                              <>
+                                <span className="text-gray-600">•</span>
+                                <span className="text-white font-medium">{selectedBot.pair.toUpperCase()}</span>
+                              </>
+                            )}
                             <span className="text-gray-600">•</span>
                             <span className="text-gray-400">
                               {selectedBot.is_paper_trading ? 'Paper' : 'Live'}
@@ -746,271 +944,700 @@ export default function BotsManagementPage() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                             </svg>
                           </button>
-                          <button
-                            onClick={() => {
-                              window.open(`https://indodax.com/trade/${selectedBot.pair.toUpperCase()}`, '_blank', 'noopener,noreferrer');
-                            }}
-                            className="p-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors"
-                            title="View Chart on Indodax"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                            </svg>
-                          </button>
+                          {selectedBot.type === 'market_maker' && selectedBot.pair && (
+                            <button
+                              onClick={() => {
+                                window.open(`https://indodax.com/trade/${selectedBot.pair.toUpperCase()}`, '_blank', 'noopener,noreferrer');
+                              }}
+                              className="p-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors"
+                              title="View Chart on Indodax"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                              </svg>
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
 
-                    {/* Stats Grid */}
-                    <div className={cn(
-                      "grid gap-4 p-6 border-b border-gray-800",
-                      selectedBot.type === 'market_maker' 
-                        ? "grid-cols-2 md:grid-cols-5" 
-                        : "grid-cols-2 md:grid-cols-4"
-                    )}>
-                      <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                        <p className="text-gray-400 text-sm mb-1">Total Trades</p>
-                        <p className="text-white font-bold text-xl">{selectedBot.total_trades || 0}</p>
-                      </div>
-                      <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                        <p className="text-gray-400 text-sm mb-1">Win Rate</p>
-                        <p className="text-white font-bold text-xl">{formatPercent(selectedBot.win_rate || 0)}</p>
-                      </div>
-                      <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                        <p className="text-gray-400 text-sm mb-1">Total P&L</p>
-                        <p className={cn('font-bold text-xl', (selectedBot.total_profit_idr || 0) >= 0 ? 'text-green-500' : 'text-red-500')}>
-                          {formatNumber(selectedBot.total_profit_idr || 0, 0)}
-                        </p>
-                      </div>
-                      <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                        <p className="text-gray-400 text-sm mb-1">IDR Balance</p>
-                        <p className="text-white font-bold text-xl">{formatNumber(selectedBot.balances?.idr || 0, 0)}</p>
-                      </div>
-                      {selectedBot.pair && selectedBot.type === 'market_maker' && (() => {
-                        // Extract base currency from pair (e.g., "btcidr" -> "btc")
-                        // Only show for Market Maker bots (Pump Hunter trades multiple pairs)
-                        const baseCurrencyKey = selectedBot.pair.replace(/idr$/i, '').toLowerCase();
-                        const baseCurrency = baseCurrencyKey.toUpperCase();
-                        const baseBalance = selectedBot.balances?.[baseCurrencyKey] || 0;
-                        return (
-                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                            <p className="text-gray-400 text-sm mb-1">{baseCurrency} Balance</p>
-                            <p className="text-white font-bold text-xl">{baseBalance.toFixed(4)}</p>
-                          </div>
-                        );
-                      })()}
-                    </div>
-
-                    {/* Spread Information (Market Maker only) */}
+                    {/* Market Maker Bot Detail */}
                     {selectedBot.type === 'market_maker' && (
-                      <div className="p-6 border-b border-gray-800">
-                        {spreadInfo && (spreadInfo.buyPrice !== undefined || spreadInfo.sellPrice !== undefined || spreadInfo.spreadPercent !== undefined) ? (
-                          <div className="space-y-4">
-                            <h3 className="text-xl font-bold text-white mb-4">Market Spread</h3>
-                            
-                            {/* Warning when spread is too tight */}
-                            {spreadInfo.spreadPercent !== undefined && 
-                             selectedBot.min_gap_percent && 
-                             spreadInfo.spreadPercent < selectedBot.min_gap_percent && (
-                              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
-                                <div className="flex items-start gap-3">
-                                  <svg className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                                  </svg>
-                                  <div className="flex-1">
-                                    <p className="text-sm text-yellow-400 font-medium">Waiting for Better Spread</p>
-                                    <p className="text-sm text-yellow-300 mt-1">
-                                      Current spread ({formatPercent(spreadInfo.spreadPercent)}) is below minimum required ({formatPercent(selectedBot.min_gap_percent)}). 
-                                      Bot is waiting for a profitable spread before placing orders.
+                      <>
+                        {/* Stats Grid */}
+                        <div className="grid gap-4 p-6 border-b border-gray-800 grid-cols-2 md:grid-cols-5">
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">Total Trades</p>
+                            <p className="text-white font-bold text-xl">{selectedBot.total_trades || 0}</p>
+                          </div>
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">Win Rate</p>
+                            <p className="text-white font-bold text-xl">{formatPercent(selectedBot.win_rate || 0)}</p>
+                          </div>
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">Total P&L</p>
+                            <p className={cn('font-bold text-xl', (selectedBot.total_profit_idr || 0) >= 0 ? 'text-green-500' : 'text-red-500')}>
+                              {formatNumber(selectedBot.total_profit_idr || 0, 0)}
+                            </p>
+                          </div>
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">IDR Balance</p>
+                            <p className="text-white font-bold text-xl">{formatNumber(selectedBot.balances?.idr || 0, 0)}</p>
+                          </div>
+                          {selectedBot.pair && (() => {
+                            const baseCurrencyKey = selectedBot.pair.replace(/idr$/i, '').toLowerCase();
+                            const baseCurrency = baseCurrencyKey.toUpperCase();
+                            const baseBalance = selectedBot.balances?.[baseCurrencyKey] || 0;
+                            return (
+                              <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                                <p className="text-gray-400 text-sm mb-1">{baseCurrency} Balance</p>
+                                <p className="text-white font-bold text-xl">{baseBalance.toFixed(4)}</p>
+                              </div>
+                            );
+                          })()}
+                        </div>
+
+                        {/* Spread Information */}
+                        <div className="p-6 border-b border-gray-800">
+                          {spreadInfo && (spreadInfo.buyPrice !== undefined || spreadInfo.sellPrice !== undefined || spreadInfo.spreadPercent !== undefined) ? (
+                            <div className="space-y-4">
+                              <h3 className="text-xl font-bold text-white mb-4">Market Spread</h3>
+                              
+                              {/* Warning when spread is too tight */}
+                              {spreadInfo.spreadPercent !== undefined && 
+                               selectedBot.min_gap_percent && 
+                               spreadInfo.spreadPercent < selectedBot.min_gap_percent && (
+                                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
+                                  <div className="flex items-start gap-3">
+                                    <svg className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                    </svg>
+                                    <div className="flex-1">
+                                      <p className="text-sm text-yellow-400 font-medium">Waiting for Better Spread</p>
+                                      <p className="text-sm text-yellow-300 mt-1">
+                                        Current spread ({formatPercent(spreadInfo.spreadPercent)}) is below minimum required ({formatPercent(selectedBot.min_gap_percent)}). 
+                                        Bot is waiting for a profitable spread before placing orders.
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                              
+                              {/* Spread details */}
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {spreadInfo.buyPrice !== undefined && (
+                                  <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                                    <p className="text-gray-400 text-sm mb-1">Buy Price (Bid)</p>
+                                    <p className="text-white font-bold text-xl">{formatNumber(spreadInfo.buyPrice, 0)}</p>
+                                  </div>
+                                )}
+                                {spreadInfo.sellPrice !== undefined && (
+                                  <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                                    <p className="text-gray-400 text-sm mb-1">Sell Price (Ask)</p>
+                                    <p className="text-white font-bold text-xl">{formatNumber(spreadInfo.sellPrice, 0)}</p>
+                                  </div>
+                                )}
+                                {spreadInfo.spreadPercent !== undefined && (
+                                  <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                                    <p className="text-gray-400 text-sm mb-1">Spread</p>
+                                    <p className={cn(
+                                      'font-bold text-xl',
+                                      spreadInfo.spreadPercent >= (selectedBot.min_gap_percent || 0) 
+                                        ? 'text-green-500' 
+                                        : 'text-yellow-500'
+                                    )}>
+                                      {formatPercent(spreadInfo.spreadPercent)}
                                     </p>
                                   </div>
-                                </div>
+                                )}
                               </div>
-                            )}
-                            
-                            {/* Spread details */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                              {spreadInfo.buyPrice !== undefined && (
-                                <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                                  <p className="text-gray-400 text-sm mb-1">Buy Price (Bid)</p>
-                                  <p className="text-white font-bold text-xl">{formatNumber(spreadInfo.buyPrice, 0)}</p>
-                                </div>
-                              )}
-                              {spreadInfo.sellPrice !== undefined && (
-                                <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                                  <p className="text-gray-400 text-sm mb-1">Sell Price (Ask)</p>
-                                  <p className="text-white font-bold text-xl">{formatNumber(spreadInfo.sellPrice, 0)}</p>
-                                </div>
-                              )}
-                              {spreadInfo.spreadPercent !== undefined && (
-                                <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                                  <p className="text-gray-400 text-sm mb-1">Spread</p>
-                                  <p className={cn(
-                                    'font-bold text-xl',
-                                    spreadInfo.spreadPercent >= (selectedBot.min_gap_percent || 0) 
-                                      ? 'text-green-500' 
-                                      : 'text-yellow-500'
-                                  )}>
-                                    {formatPercent(spreadInfo.spreadPercent)}
-                                  </p>
-                                </div>
-                              )}
                             </div>
-                          </div>
-                        ) : selectedBot.status === 'running' ? (
-                          <div className="text-center py-2">
-                            <div className="flex items-center justify-center gap-2">
-                              <div className="w-1.5 h-1.5 bg-primary-500 rounded-full animate-pulse"></div>
-                              <p className="text-gray-500 text-xs animate-pulse">Waiting for market data...</p>
+                          ) : selectedBot.status === 'running' ? (
+                            <div className="text-center py-2">
+                              <div className="flex items-center justify-center gap-2">
+                                <div className="w-1.5 h-1.5 bg-primary-500 rounded-full animate-pulse"></div>
+                                <p className="text-gray-500 text-xs animate-pulse">Waiting for market data...</p>
+                              </div>
                             </div>
-                          </div>
-                        ) : null}
-                      </div>
+                          ) : null}
+                        </div>
+
+                        {/* Orders Section */}
+                        <div className="p-6">
+                          <h3 className="text-xl font-bold text-white mb-4">Orders</h3>
+                          
+                          {ordersLoading ? (
+                            <div className="flex justify-center py-8">
+                              <LoadingSpinner />
+                            </div>
+                          ) : orders && orders.length > 0 ? (
+                            <div className="overflow-x-auto custom-scrollbar">
+                              <table className="w-full">
+                                <thead>
+                                  <tr className="border-b border-gray-800">
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Side</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Status</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Price</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Amount</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Filled</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Created</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {[...orders].sort((a, b) => {
+                                    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+                                  }).map((order) => (
+                                    <tr key={order.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                                      <td className="px-4 py-3">
+                                        <span className={cn(
+                                          'px-2 py-1 rounded text-xs font-medium',
+                                          order.side === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                        )}>
+                                          {order.side.toUpperCase()}
+                                        </span>
+                                      </td>
+                                      <td className="px-4 py-3">
+                                        <span className={cn(
+                                          'px-2 py-1 rounded text-xs font-medium',
+                                          order.status === 'filled' ? 'bg-green-500/20 text-green-400' :
+                                          order.status === 'open' ? 'bg-blue-500/20 text-blue-400' :
+                                          order.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
+                                          order.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' :
+                                          'bg-red-500/20 text-red-400'
+                                        )}>
+                                          {order.status.toUpperCase()}
+                                        </span>
+                                      </td>
+                                      <td className="px-4 py-3 text-right text-white">{formatNumber(order.price, 0)}</td>
+                                      <td className="px-4 py-3 text-right text-white">{order.amount.toFixed(8)}</td>
+                                      <td className="px-4 py-3 text-right text-gray-400">{order.filled_amount.toFixed(8)}</td>
+                                      <td className="px-4 py-3 text-gray-400 text-xs">
+                                        {new Date(order.created_at).toLocaleString()}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : (
+                            <div className="bg-gray-900/50 rounded-lg p-8 border border-gray-800 text-center">
+                              <p className="text-gray-400">No orders yet</p>
+                            </div>
+                          )}
+                        </div>
+                      </>
                     )}
 
-                    {/* Positions Section (Pump Hunter only) */}
+                    {/* Pump Hunter Bot Detail */}
                     {selectedBot.type === 'pump_hunter' && (
-                      <div className="p-6 border-b border-gray-800">
-                        <h3 className="text-xl font-bold text-white mb-4">Positions</h3>
-                        
-                        {positionsLoading ? (
-                          <div className="flex justify-center py-8">
-                            <LoadingSpinner />
+                      <>
+                        {/* Stats Grid */}
+                        <div className="grid gap-4 p-6 border-b border-gray-800 grid-cols-2 md:grid-cols-4">
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">Total Trades</p>
+                            <p className="text-white font-bold text-xl">{selectedBot.total_trades || 0}</p>
                           </div>
-                        ) : positions && (positions.positions?.length > 0 || (Array.isArray(positions) && positions.length > 0)) ? (
-                          <div className="space-y-3">
-                            {(Array.isArray(positions) ? positions : positions.positions).map((position) => (
-                              <div key={position.id} className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
-                                <div className="flex items-center justify-between mb-2">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-white font-bold">{position.pair.toUpperCase()}</span>
-                                    <span className={cn(
-                                      'px-2 py-1 rounded text-xs font-medium',
-                                      position.status === 'open' ? 'bg-green-500/20 text-green-400' :
-                                      position.status === 'buying' ? 'bg-green-500/20 text-green-400' :
-                                      position.status === 'selling' ? 'bg-red-500/20 text-red-400' :
-                                      position.status === 'closed' ? 'bg-gray-500/20 text-gray-400' :
-                                      'bg-gray-500/20 text-gray-400'
-                                    )}>
-                                      {position.status.toUpperCase()}
-                                    </span>
-                                  </div>
-                                  {position.status !== 'buying' && (
-                                    <div className="text-right">
-                                      <div className={cn(
-                                        'font-bold',
-                                        position.profit_idr >= 0 ? 'text-green-500' : 'text-red-500'
-                                      )}>
-                                        {formatIDR(position.profit_idr)}
-                                      </div>
-                                      <div className={cn(
-                                        'text-xs',
-                                        (position.profit_percent ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-                                      )}>
-                                        {formatPercent(position.profit_percent ?? 0)}
-                                      </div>
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">Win Rate</p>
+                            <p className="text-white font-bold text-xl">{formatPercent(selectedBot.win_rate || 0)}</p>
+                          </div>
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">Total P&L</p>
+                            <p className={cn('font-bold text-xl', (selectedBot.total_profit_idr || 0) >= 0 ? 'text-green-500' : 'text-red-500')}>
+                              {formatNumber(selectedBot.total_profit_idr || 0, 0)}
+                            </p>
+                          </div>
+                          <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                            <p className="text-gray-400 text-sm mb-1">IDR Balance</p>
+                            <p className="text-white font-bold text-xl">{formatNumber(selectedBot.balances?.idr || 0, 0)}</p>
+                          </div>
+                        </div>
+
+                        {/* Positions Section */}
+                        <div className="p-6 border-b border-gray-800">
+                          <h3 className="text-xl font-bold text-white mb-4">Positions</h3>
+                          
+                          {positionsLoading ? (
+                            <div className="flex justify-center py-8">
+                              <LoadingSpinner />
+                            </div>
+                          ) : positions && (positions.positions?.length > 0 || (Array.isArray(positions) && positions.length > 0)) ? (
+                            <>
+                              {/* Open Positions Table */}
+                              {(() => {
+                                const allPositions = Array.isArray(positions) ? positions : positions.positions;
+                                const openPositions = allPositions.filter((p) => 
+                                  p.status === 'pending' || 
+                                  p.status === 'buying' || 
+                                  p.status === 'open' || 
+                                  p.status === 'selling'
+                                );
+                                
+                                return openPositions.length > 0 ? (
+                                  <div className="mb-6">
+                                    <h4 className="text-lg font-semibold text-white mb-3">Open Positions</h4>
+                                    <div className="overflow-x-auto custom-scrollbar">
+                                      <table className="w-full">
+                                        <thead>
+                                          <tr className="border-b border-gray-800">
+                                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Pair</th>
+                                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Status</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Current Price</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Entry Price</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Exit Price</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Profit</th>
+                                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Entry Time</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {openPositions.map((position) => {
+                                            const coin = getCoin(position.pair);
+                                            const currentPrice = coin?.current_price;
+                                            
+                                            // Calculate profit for open positions based on current price
+                                            let profitIdr = position.profit_idr ?? 0;
+                                            let profitPercent = position.profit_percent ?? 0;
+                                            
+                                            // Ensure profitIdr is a valid number
+                                            if (typeof profitIdr !== 'number' || isNaN(profitIdr)) {
+                                              profitIdr = 0;
+                                            }
+                                            
+                                            if (position.status === 'open' && currentPrice && position.entry_price > 0) {
+                                              // Calculate profit percentage
+                                              profitPercent = ((currentPrice - position.entry_price) / position.entry_price) * 100;
+                                              
+                                              // Ensure profitPercent is valid
+                                              if (isNaN(profitPercent)) {
+                                                profitPercent = 0;
+                                              }
+                                              
+                                              // Calculate profit in IDR
+                                              // Use entry_quantity if available, otherwise calculate from entry_amount_idr
+                                              if (position.entry_quantity && position.entry_quantity > 0) {
+                                                const calculatedProfit = (currentPrice - position.entry_price) * position.entry_quantity;
+                                                if (!isNaN(calculatedProfit)) {
+                                                  profitIdr = calculatedProfit;
+                                                }
+                                              } else if (position.entry_amount_idr && position.entry_amount_idr > 0) {
+                                                // Calculate profit based on entry amount
+                                                const calculatedProfit = position.entry_amount_idr * (profitPercent / 100);
+                                                if (!isNaN(calculatedProfit)) {
+                                                  profitIdr = calculatedProfit;
+                                                }
+                                              }
+                                            }
+                                            
+                                            // Final validation to ensure we never display NaN
+                                            if (isNaN(profitIdr)) {
+                                              profitIdr = 0;
+                                            }
+                                            if (isNaN(profitPercent)) {
+                                              profitPercent = 0;
+                                            }
+                                            
+                                            return (
+                                              <tr key={position.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                                                <td className="px-4 py-3 text-white font-medium">{position.pair.toUpperCase()}</td>
+                                                <td className="px-4 py-3">
+                                                  <span className={cn(
+                                                    'px-2 py-1 rounded text-xs font-medium',
+                                                    position.status === 'open' ? 'bg-green-500/20 text-green-400' :
+                                                    position.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                    position.status === 'buying' ? 'bg-green-500/20 text-green-400' :
+                                                    position.status === 'selling' ? 'bg-red-500/20 text-red-400' :
+                                                    'bg-gray-500/20 text-gray-400'
+                                                  )}>
+                                                    {position.status.toUpperCase()}
+                                                  </span>
+                                                </td>
+                                                <td className="px-4 py-3 text-right text-white">
+                                                  {currentPrice ? formatNumber(currentPrice, 0) : '-'}
+                                                </td>
+                                                <td className="px-4 py-3 text-right text-white">
+                                                  {formatNumber(position.entry_price, 0)}
+                                                </td>
+                                                <td className="px-4 py-3 text-right text-white">
+                                                  {position.exit_price ? formatNumber(position.exit_price, 0) : '-'}
+                                                </td>
+                                                <td className="px-4 py-3 text-right">
+                                                  {position.status === 'buying' || position.status === 'pending' ? (
+                                                    <span className="text-gray-500">-</span>
+                                                  ) : (
+                                                    <div>
+                                                      <div className={cn(
+                                                        'font-bold',
+                                                        profitIdr >= 0 ? 'text-green-500' : 'text-red-500'
+                                                      )}>
+                                                        {formatIDR(profitIdr)}
+                                                      </div>
+                                                      <div className={cn(
+                                                        'text-xs',
+                                                        profitPercent >= 0 ? 'text-green-400' : 'text-red-400'
+                                                      )}>
+                                                        {formatPercent(profitPercent)}
+                                                      </div>
+                                                    </div>
+                                                  )}
+                                                </td>
+                                                <td className="px-4 py-3 text-gray-400 text-xs">
+                                                  {position.entry_at ? (
+                                                    <div className="flex flex-col">
+                                                      <span>{new Date(position.entry_at).toLocaleDateString()}</span>
+                                                      <span>{new Date(position.entry_at).toLocaleTimeString()}</span>
+                                                    </div>
+                                                  ) : '-'}
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
                                     </div>
-                                  )}
+                                  </div>
+                                ) : (
+                                  <div className="bg-gray-900/50 rounded-lg p-12 border border-gray-800 text-center mb-6">
+                                    {selectedBot.status === 'running' ? (
+                                      <div className="flex flex-col items-center">
+                                        <div className="relative mb-6">
+                                          <div className={cn(
+                                            "absolute inset-0 rounded-full blur-2xl animate-pulse",
+                                            (selectedBot.total_profit_idr ?? 0) >= 0 
+                                              ? "bg-green-500/20" 
+                                              : "bg-red-500/20"
+                                          )} />
+                                          <img 
+                                            src={(selectedBot.total_profit_idr ?? 0) >= 0 ? "/tuyul-work-win.png" : "/tuyul-work-lost.png"} 
+                                            alt="Tuyul Working" 
+                                            className="relative w-80 h-auto drop-shadow-2xl" 
+                                          />
+                                        </div>
+                                        <div className="space-y-2">
+                                          <h4 className={cn(
+                                            "text-2xl font-bold bg-clip-text text-transparent animate-pulse",
+                                            (selectedBot.total_profit_idr ?? 0) >= 0
+                                              ? "bg-gradient-to-r from-primary-400 via-green-400 to-primary-400"
+                                              : "bg-gradient-to-r from-red-400 via-orange-400 to-red-400"
+                                          )}>
+                                            sneaking around looking for easy money...
+                                          </h4>
+                                          <p className="text-gray-500 text-sm italic">"i'm on a heist master! let me work my magic..."</p>
+                                        </div>
+                                      </div>
+                                    ) : selectedBot.status === 'stopped' ? (
+                                      <div className="flex flex-col items-center">
+                                        <div className="relative mb-6">
+                                          {(() => {
+                                            const profit = selectedBot.total_profit_idr ?? 0;
+                                            if (profit === 0) {
+                                              return (
+                                                <>
+                                                  <div className="absolute inset-0 rounded-full blur-2xl bg-gray-500/20" />
+                                                  <img 
+                                                    src="/tuyul-bored.png" 
+                                                    alt="Tuyul" 
+                                                    className="relative w-64 h-auto drop-shadow-2xl" 
+                                                  />
+                                                </>
+                                              );
+                                            } else if (profit > 0) {
+                                              return (
+                                                <>
+                                                  <div className="absolute inset-0 rounded-full blur-2xl bg-green-500/20" />
+                                                  <img 
+                                                    src="/tuyul-win.png" 
+                                                    alt="Tuyul" 
+                                                    className="relative w-64 h-auto drop-shadow-2xl" 
+                                                  />
+                                                </>
+                                              );
+                                            } else {
+                                              return (
+                                                <>
+                                                  <div className="absolute inset-0 rounded-full blur-2xl bg-red-500/20" />
+                                                  <img 
+                                                    src="/tuyul-lost.png" 
+                                                    alt="Tuyul" 
+                                                    className="relative w-64 h-auto drop-shadow-2xl" 
+                                                  />
+                                                </>
+                                              );
+                                            }
+                                          })()}
+                                        </div>
+                                        {(() => {
+                                          const profit = selectedBot.total_profit_idr ?? 0;
+                                          if (profit > 0) {
+                                            return (
+                                              <div className="space-y-2">
+                                                <p className="text-lg font-semibold text-green-400 italic">"hehehe! look at all this loot i collected!"</p>
+                                              </div>
+                                            );
+                                          } else if (profit < 0) {
+                                            return (
+                                              <div className="space-y-2">
+                                                <p className="text-lg font-semibold text-red-400 italic">"uh oh master... i might have... lost some money? please don't fire me!"</p>
+                                              </div>
+                                            );
+                                          } else {
+                                            return (
+                                              <div className="space-y-2">
+                                                <p className="text-lg font-semibold text-gray-400 italic">"master... i'm just sitting here doing nothing... can i go steal something?"</p>
+                                              </div>
+                                            );
+                                          }
+                                        })()}
+                                      </div>
+                                    ) : (
+                                      <p className="text-gray-400">No open positions</p>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                              
+                              {/* Closed Positions Table */}
+                              {(() => {
+                                const allPositions = Array.isArray(positions) ? positions : positions.positions;
+                                const closedPositions = allPositions.filter((p) => p.status === 'closed' || p.status === 'error');
+                                
+                                return closedPositions.length > 0 ? (
+                                  <div>
+                                    <h4 className="text-lg font-semibold text-white mb-3">Closed Positions</h4>
+                                    <div className="overflow-x-auto custom-scrollbar">
+                                      <table className="w-full">
+                                        <thead>
+                                          <tr className="border-b border-gray-800">
+                                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Pair</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Entry Price</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Exit Price</th>
+                                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Profit</th>
+                                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Entry Time</th>
+                                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Exit Time</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {closedPositions.map((position) => {
+                                            let profitIdr = position.profit_idr ?? 0;
+                                            let profitPercent = position.profit_percent ?? 0;
+                                            
+                                            // Ensure values are valid numbers
+                                            if (typeof profitIdr !== 'number' || isNaN(profitIdr)) {
+                                              profitIdr = 0;
+                                            }
+                                            if (typeof profitPercent !== 'number' || isNaN(profitPercent)) {
+                                              profitPercent = 0;
+                                            }
+                                            
+                                            return (
+                                              <tr key={position.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                                                <td className="px-4 py-3 text-white font-medium">{position.pair.toUpperCase()}</td>
+                                                <td className="px-4 py-3 text-right text-white">
+                                                  {formatNumber(position.entry_price, 0)}
+                                                </td>
+                                                <td className="px-4 py-3 text-right text-white">
+                                                  {position.exit_price ? formatNumber(position.exit_price, 0) : '-'}
+                                                </td>
+                                                <td className="px-4 py-3 text-right">
+                                                  <div>
+                                                    <div className={cn(
+                                                      'font-bold',
+                                                      profitIdr >= 0 ? 'text-green-500' : 'text-red-500'
+                                                    )}>
+                                                      {formatIDR(profitIdr)}
+                                                    </div>
+                                                    <div className={cn(
+                                                      'text-xs',
+                                                      profitPercent >= 0 ? 'text-green-400' : 'text-red-400'
+                                                    )}>
+                                                      {formatPercent(profitPercent)}
+                                                    </div>
+                                                  </div>
+                                                </td>
+                                                <td className="px-4 py-3 text-gray-400 text-xs">
+                                                  {position.entry_at ? new Date(position.entry_at).toLocaleTimeString() : '-'}
+                                                </td>
+                                                <td className="px-4 py-3 text-gray-400 text-xs">
+                                                  {position.exit_at ? new Date(position.exit_at).toLocaleTimeString() : '-'}
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                ) : null;
+                              })()}
+                            </>
+                          ) : (
+                            <div className="bg-gray-900/50 rounded-lg p-12 border border-gray-800 text-center">
+                              {selectedBot.status === 'running' ? (
+                                <div className="flex flex-col items-center">
+                                  <div className="relative mb-6">
+                                    <div className={cn(
+                                      "absolute inset-0 rounded-full blur-2xl animate-pulse",
+                                      (selectedBot.total_profit_idr ?? 0) >= 0 
+                                        ? "bg-green-500/20" 
+                                        : "bg-red-500/20"
+                                    )} />
+                                    <img 
+                                      src={(selectedBot.total_profit_idr ?? 0) >= 0 ? "/tuyul-work-win.png" : "/tuyul-work-lost.png"} 
+                                      alt="Tuyul Working" 
+                                      className="relative w-80 h-auto drop-shadow-2xl" 
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <h4 className={cn(
+                                      "text-2xl font-bold bg-clip-text text-transparent animate-pulse",
+                                      (selectedBot.total_profit_idr ?? 0) >= 0
+                                        ? "bg-gradient-to-r from-primary-400 via-green-400 to-primary-400"
+                                        : "bg-gradient-to-r from-red-400 via-orange-400 to-red-400"
+                                    )}>
+                                      sneaking around looking for easy money...
+                                    </h4>
+                                    <p className="text-gray-500 text-sm italic">"i'm on a heist master! let me work my magic..."</p>
+                                  </div>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2 text-sm">
-                                  <div>
-                                    <span className="text-gray-400">Entry Price: </span>
-                                    <span className="text-white">{position.entry_price.toLocaleString()}</span>
+                              ) : selectedBot.status === 'stopped' ? (
+                                <div className="flex flex-col items-center">
+                                  <div className="relative mb-6">
+                                    {(() => {
+                                      const profit = selectedBot.total_profit_idr ?? 0;
+                                      if (profit === 0) {
+                                        return (
+                                          <>
+                                            <div className="absolute inset-0 rounded-full blur-2xl bg-gray-500/20" />
+                                            <img 
+                                              src="/tuyul-bored.png" 
+                                              alt="Tuyul" 
+                                              className="relative w-64 h-auto drop-shadow-2xl" 
+                                            />
+                                          </>
+                                        );
+                                      } else if (profit > 0) {
+                                        return (
+                                          <>
+                                            <div className="absolute inset-0 rounded-full blur-2xl bg-green-500/20" />
+                                            <img 
+                                              src="/tuyul-win.png" 
+                                              alt="Tuyul" 
+                                              className="relative w-64 h-auto drop-shadow-2xl" 
+                                            />
+                                          </>
+                                        );
+                                      } else {
+                                        return (
+                                          <>
+                                            <div className="absolute inset-0 rounded-full blur-2xl bg-red-500/20" />
+                                            <img 
+                                              src="/tuyul-lost.png" 
+                                              alt="Tuyul" 
+                                              className="relative w-64 h-auto drop-shadow-2xl" 
+                                            />
+                                          </>
+                                        );
+                                      }
+                                    })()}
                                   </div>
-                                  <div>
-                                    <span className="text-gray-400">Buy Amount: </span>
-                                    <span className="text-white">{formatNumber(position.entry_amount_idr || position.entry_amount || 0, 0)}</span>
-                                  </div>
-                                  <div>
-                                    <span className="text-gray-400">Exit Price: </span>
-                                    <span className="text-white">{position.exit_price ? position.exit_price.toLocaleString() : '-'}</span>
-                                  </div>
-                                  <div>
-                                    <span className="text-gray-400">Sell Amount: </span>
-                                    <span className="text-white">{position.exit_amount_idr || position.exit_amount ? formatNumber(position.exit_amount_idr || position.exit_amount || 0, 0) : '-'}</span>
-                                  </div>
+                                  {(() => {
+                                    const profit = selectedBot.total_profit_idr ?? 0;
+                                    if (profit > 0) {
+                                      return (
+                                        <div className="space-y-2">
+                                          <p className="text-lg font-semibold text-green-400 italic">"hehehe! look at all this loot i collected!"</p>
+                                        </div>
+                                      );
+                                    } else if (profit < 0) {
+                                      return (
+                                        <div className="space-y-2">
+                                          <p className="text-lg font-semibold text-red-400 italic">"uh oh master... i might have... lost some money? please don't fire me!"</p>
+                                        </div>
+                                      );
+                                    } else {
+                                      return (
+                                        <div className="space-y-2">
+                                          <p className="text-lg font-semibold text-gray-400 italic">"master... i'm just sitting here doing nothing... can i go steal something?"</p>
+                                        </div>
+                                      );
+                                    }
+                                  })()}
                                 </div>
+                              ) : (
+                                <p className="text-gray-400">No positions yet</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Orders Section - Only show if there are positions */}
+                        {positions && (positions.positions?.length > 0 || (Array.isArray(positions) && positions.length > 0)) && (
+                          <div className="p-6">
+                            <h3 className="text-xl font-bold text-white mb-4">Orders</h3>
+                            
+                            {ordersLoading ? (
+                              <div className="flex justify-center py-8">
+                                <LoadingSpinner />
                               </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="bg-gray-900/50 rounded-lg p-8 border border-gray-800 text-center">
-                            <p className="text-gray-400">No positions yet</p>
+                            ) : orders && orders.length > 0 ? (
+                              <div className="overflow-x-auto custom-scrollbar">
+                                <table className="w-full">
+                                  <thead>
+                                    <tr className="border-b border-gray-800">
+                                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Pair</th>
+                                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Side</th>
+                                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Status</th>
+                                      <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Price</th>
+                                      <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Amount</th>
+                                      <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Filled</th>
+                                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Created</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                  {[...orders].sort((a, b) => {
+                                    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+                                  }).map((order) => (
+                                    <tr key={order.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                                      <td className="px-4 py-3 text-white font-medium">{order.pair.toUpperCase()}</td>
+                                      <td className="px-4 py-3">
+                                        <span className={cn(
+                                          'px-2 py-1 rounded text-xs font-medium',
+                                          order.side === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                        )}>
+                                          {order.side.toUpperCase()}
+                                        </span>
+                                      </td>
+                                      <td className="px-4 py-3">
+                                        <span className={cn(
+                                          'px-2 py-1 rounded text-xs font-medium',
+                                          order.status === 'filled' ? 'bg-green-500/20 text-green-400' :
+                                          order.status === 'open' ? 'bg-blue-500/20 text-blue-400' :
+                                          order.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
+                                          order.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' :
+                                          'bg-red-500/20 text-red-400'
+                                        )}>
+                                          {order.status.toUpperCase()}
+                                        </span>
+                                      </td>
+                                      <td className="px-4 py-3 text-right text-white">{formatNumber(order.price, 0)}</td>
+                                      <td className="px-4 py-3 text-right text-white">{order.amount.toFixed(8)}</td>
+                                      <td className="px-4 py-3 text-right text-gray-400">{order.filled_amount.toFixed(8)}</td>
+                                      <td className="px-4 py-3 text-gray-400 text-xs">
+                                        {new Date(order.created_at).toLocaleString()}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : (
+                            <div className="bg-gray-900/50 rounded-lg p-8 border border-gray-800 text-center">
+                              <p className="text-gray-400">No orders yet</p>
+                            </div>
+                          )}
                           </div>
                         )}
-                      </div>
+                      </>
                     )}
-
-                    {/* Orders Section (Both bot types) */}
-                    <div className="p-6">
-                      <h3 className="text-xl font-bold text-white mb-4">Orders</h3>
-                      
-                      {ordersLoading ? (
-                        <div className="flex justify-center py-8">
-                          <LoadingSpinner />
-                        </div>
-                      ) : orders && orders.length > 0 ? (
-                        <div className="overflow-x-auto custom-scrollbar">
-                          <table className="w-full">
-                            <thead>
-                              <tr className="border-b border-gray-800">
-                                {selectedBot.type !== 'market_maker' && (
-                                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Pair</th>
-                                )}
-                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Side</th>
-                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Status</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Price</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Amount</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400 uppercase">Filled</th>
-                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">Created</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {[...orders].sort((a, b) => {
-                                // Sort by created_at descending (newest first)
-                                return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-                              }).map((order) => (
-                                <tr key={order.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
-                                  {selectedBot.type !== 'market_maker' && (
-                                    <td className="px-4 py-3 text-white font-medium">{order.pair.toUpperCase()}</td>
-                                  )}
-                                  <td className="px-4 py-3">
-                                    <span className={cn(
-                                      'px-2 py-1 rounded text-xs font-medium',
-                                      order.side === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                                    )}>
-                                      {order.side.toUpperCase()}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3">
-                                    <span className={cn(
-                                      'px-2 py-1 rounded text-xs font-medium',
-                                      order.status === 'filled' ? 'bg-green-500/20 text-green-400' :
-                                      order.status === 'open' ? 'bg-blue-500/20 text-blue-400' :
-                                      order.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
-                                      order.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' :
-                                      'bg-red-500/20 text-red-400'
-                                    )}>
-                                      {order.status.toUpperCase()}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3 text-right text-white">{formatNumber(order.price, 0)}</td>
-                                  <td className="px-4 py-3 text-right text-white">{order.amount.toFixed(8)}</td>
-                                  <td className="px-4 py-3 text-right text-gray-400">{order.filled_amount.toFixed(8)}</td>
-                                  <td className="px-4 py-3 text-gray-400 text-xs">
-                                    {new Date(order.created_at).toLocaleString()}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : (
-                        <div className="bg-gray-900/50 rounded-lg p-8 border border-gray-800 text-center">
-                          <p className="text-gray-400">No orders yet</p>
-                        </div>
-                      )}
-                    </div>
                   </div>
                 </div>
               ) : (
@@ -1193,6 +1820,25 @@ export default function BotsManagementPage() {
                     </>
                   )}
 
+                  {/* Initial Balance - Only for Pump Hunter */}
+                  {formData.type === 'pump_hunter' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">Initial Balance (IDR)</label>
+                      <input
+                        type="number"
+                        min="10000"
+                        step="10000"
+                        value={formData.initial_balance_idr || 1000000}
+                        onChange={(e) => setFormData({
+                          ...formData,
+                          initial_balance_idr: parseFloat(e.target.value),
+                        })}
+                        className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-primary-500"
+                        required
+                      />
+                    </div>
+                  )}
+
                       {/* Trading Mode */}
                       <div>
                         <label className="block text-sm font-medium text-gray-300 mb-2">Trading Mode</label>
@@ -1256,7 +1902,8 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Initial Balance (IDR)</label>
                                 <input
                                   type="number"
-                                  step="100000"
+                                  min="10000"
+                                  step="10000"
                                   value={formData.initial_balance_idr || 1000000}
                                   onChange={(e) => setFormData({
                                     ...formData,
@@ -1270,6 +1917,7 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Order Size (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={formData.order_size_idr || 100000}
                                   onChange={(e) => setFormData({
@@ -1314,6 +1962,7 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Max Loss (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={formData.max_loss_idr || 500000}
                                   onChange={(e) => setFormData({
@@ -1601,6 +2250,7 @@ export default function BotsManagementPage() {
                         <label className="block text-xs text-gray-400 mb-1">Max Position Size (IDR)</label>
                         <input
                           type="number"
+                          min="10000"
                           step="10000"
                           value={formData.risk_management?.max_position_idr || 500000}
                           onChange={(e) => setFormData({
@@ -1636,6 +2286,7 @@ export default function BotsManagementPage() {
                         <label className="block text-xs text-gray-400 mb-1">Daily Loss Limit (IDR)</label>
                         <input
                           type="number"
+                          min="10000"
                           step="10000"
                           value={formData.risk_management?.daily_loss_limit_idr || 1000000}
                           onChange={(e) => setFormData({
@@ -1670,6 +2321,7 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Min Balance (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={formData.risk_management?.min_balance_idr || 100000}
                                   onChange={(e) => setFormData({
@@ -1798,24 +2450,6 @@ export default function BotsManagementPage() {
                         </div>
                       )}
 
-                      {/* Initial Balance - Only for Pump Hunter */}
-                      {editFormData.type === 'pump_hunter' && (
-                        <div>
-                          <label className="block text-sm font-medium text-gray-300 mb-2">Initial Balance (IDR)</label>
-                          <input
-                            type="number"
-                            step="100000"
-                            value={editFormData.initial_balance_idr || 1000000}
-                            onChange={(e) => setEditFormData({
-                              ...editFormData,
-                              initial_balance_idr: parseFloat(e.target.value),
-                            })}
-                            className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-primary-500"
-                            required
-                          />
-                        </div>
-                      )}
-
                       {/* Trading Mode */}
                       <div>
                         <label className="block text-sm font-medium text-gray-300 mb-2">Trading Mode</label>
@@ -1879,7 +2513,8 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Initial Balance (IDR)</label>
                                 <input
                                   type="number"
-                                  step="100000"
+                                  min="10000"
+                                  step="10000"
                                   value={editFormData.initial_balance_idr || 1000000}
                                   onChange={(e) => setEditFormData({
                                     ...editFormData,
@@ -1893,6 +2528,7 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Order Size (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={editFormData.order_size_idr || 100000}
                                   onChange={(e) => setEditFormData({
@@ -1937,6 +2573,7 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Max Loss (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={editFormData.max_loss_idr || 500000}
                                   onChange={(e) => setEditFormData({
@@ -2221,15 +2858,19 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Max Position Size (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={editFormData.risk_management?.max_position_idr || 500000}
-                                  onChange={(e) => setEditFormData({
-                                    ...editFormData,
-                                    risk_management: {
-                                      ...editFormData.risk_management!,
-                                      max_position_idr: parseFloat(e.target.value),
-                                    },
-                                  })}
+                                  onChange={(e) => {
+                                    const value = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                                    setEditFormData({
+                                      ...editFormData,
+                                      risk_management: {
+                                        ...editFormData.risk_management!,
+                                        max_position_idr: isNaN(value) ? 0 : value,
+                                      },
+                                    });
+                                  }}
                                   className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-primary-500"
                                 />
                               </div>
@@ -2256,15 +2897,19 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Daily Loss Limit (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={editFormData.risk_management?.daily_loss_limit_idr || 1000000}
-                                  onChange={(e) => setEditFormData({
-                                    ...editFormData,
-                                    risk_management: {
-                                      ...editFormData.risk_management!,
-                                      daily_loss_limit_idr: parseFloat(e.target.value),
-                                    },
-                                  })}
+                                  onChange={(e) => {
+                                    const value = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                                    setEditFormData({
+                                      ...editFormData,
+                                      risk_management: {
+                                        ...editFormData.risk_management!,
+                                        daily_loss_limit_idr: isNaN(value) ? 0 : value,
+                                      },
+                                    });
+                                  }}
                                   className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-primary-500"
                                 />
                               </div>
@@ -2290,15 +2935,19 @@ export default function BotsManagementPage() {
                                 <label className="block text-xs text-gray-400 mb-1">Min Balance (IDR)</label>
                                 <input
                                   type="number"
+                                  min="10000"
                                   step="10000"
                                   value={editFormData.risk_management?.min_balance_idr || 100000}
-                                  onChange={(e) => setEditFormData({
-                                    ...editFormData,
-                                    risk_management: {
-                                      ...editFormData.risk_management!,
-                                      min_balance_idr: parseFloat(e.target.value),
-                                    },
-                                  })}
+                                  onChange={(e) => {
+                                    const value = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                                    setEditFormData({
+                                      ...editFormData,
+                                      risk_management: {
+                                        ...editFormData.risk_management!,
+                                        min_balance_idr: isNaN(value) ? 0 : value,
+                                      },
+                                    });
+                                  }}
                                   className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-primary-500"
                                 />
                               </div>
