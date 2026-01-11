@@ -81,7 +81,7 @@ export function LoginPage() {
             <img 
               src="/logo.png" 
               alt="TUYUL" 
-              className="relative h-48 w-auto mx-auto mb-4 animate-bounce-slow object-contain drop-shadow-[0_0_25px_rgba(251,191,36,0.7)]" 
+              className="relative h-64 w-auto mx-auto mb-4 animate-bounce-slow object-contain drop-shadow-[0_0_30px_rgba(251,191,36,0.8)]" 
             />
           </div>
           <p className="text-gray-400 animate-fade-in-up">Tuyul At Your Service</p>
