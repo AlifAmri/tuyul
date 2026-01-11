@@ -66,7 +66,14 @@ export function Sidebar() {
     <aside className="fixed left-0 top-0 h-screen w-64 bg-gray-900 dark:bg-gray-950 border-r border-gray-800 dark:border-gray-900 flex flex-col z-40">
       {/* Logo */}
       <div className="flex items-center gap-3 px-6 py-6 border-b border-gray-800 dark:border-gray-900">
-        <img src="/logo.png" alt="TUYUL" className="w-10 h-10 rounded-full" />
+        <div className="relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-amber-400/50 via-yellow-500/50 to-amber-400/50 rounded-lg blur-xl animate-pulse"></div>
+          <img 
+            src="/logo.png" 
+            alt="TUYUL" 
+            className="relative h-14 w-auto rounded-lg object-contain drop-shadow-[0_0_15px_rgba(251,191,36,0.6)]" 
+          />
+        </div>
         <span className="text-xl font-bold text-white">TUYUL</span>
       </div>
 

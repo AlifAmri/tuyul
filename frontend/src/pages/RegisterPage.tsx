@@ -78,11 +78,14 @@ export function RegisterPage() {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-10">
-          <img 
-            src="/logo.png" 
-            alt="TUYUL" 
-            className="w-40 h-40 mx-auto mb-4 animate-bounce-slow" 
-          />
+          <div className="relative inline-block">
+            <div className="absolute inset-0 bg-gradient-to-r from-amber-400/60 via-yellow-500/60 to-amber-400/60 rounded-lg blur-2xl animate-pulse"></div>
+            <img 
+              src="/logo.png" 
+              alt="TUYUL" 
+              className="relative h-48 w-auto mx-auto mb-4 animate-bounce-slow object-contain drop-shadow-[0_0_25px_rgba(251,191,36,0.7)]" 
+            />
+          </div>
           <p className="text-gray-400 animate-fade-in-up">Tuyul At Your Service</p>
         </div>
 

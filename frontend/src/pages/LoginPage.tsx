@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { authService } from '@/api/services/auth';
 import { useAuthStore } from '@/stores/authStore';
@@ -76,11 +76,14 @@ export function LoginPage() {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-10">
-          <img 
-            src="/logo.png" 
-            alt="TUYUL" 
-            className="w-40 h-40 mx-auto mb-4 animate-bounce-slow" 
-          />
+          <div className="relative inline-block">
+            <div className="absolute inset-0 bg-gradient-to-r from-amber-400/60 via-yellow-500/60 to-amber-400/60 rounded-lg blur-2xl animate-pulse"></div>
+            <img 
+              src="/logo.png" 
+              alt="TUYUL" 
+              className="relative h-48 w-auto mx-auto mb-4 animate-bounce-slow object-contain drop-shadow-[0_0_25px_rgba(251,191,36,0.7)]" 
+            />
+          </div>
           <p className="text-gray-400 animate-fade-in-up">Tuyul At Your Service</p>
         </div>
 
@@ -97,7 +100,7 @@ export function LoginPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-6">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-gray-300 mb-2">
                 Username
@@ -128,36 +131,29 @@ export function LoginPage() {
               />
             </div>
 
-            <button
-              type="submit"
-              disabled={loginMutation.isPending}
-              className="w-full py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {loginMutation.isPending ? (
-                <>
-                  <LoadingSpinner size="sm" />
-                  <span>Signing in...</span>
-                </>
-              ) : (
-                'Sign In'
-              )}
-            </button>
+            <div className="pt-4">
+              <button
+                type="submit"
+                disabled={loginMutation.isPending}
+                className="w-full py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {loginMutation.isPending ? (
+                  <>
+                    <LoadingSpinner size="sm" />
+                    <span>Signing in...</span>
+                  </>
+                ) : (
+                  'Sign In'
+                )}
+              </button>
+            </div>
           </form>
-
-          <div className="mt-6 text-center">
-            <p className="text-gray-400 text-sm">
-              Don't have an account?{' '}
-              <Link to="/register" className="text-primary-500 hover:text-primary-400 font-medium">
-                Sign Up
-              </Link>
-            </p>
-          </div>
           </div>
         </div>
 
         {/* Footer */}
         <p className="text-center text-gray-500 text-sm mt-8">
-          © 2024 TUYUL. All rights reserved.
+          © 2024 Enigma Venture. All rights reserved.
         </p>
       </div>
     </div>

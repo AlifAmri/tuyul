@@ -85,7 +85,14 @@ export function Navbar() {
 
           {/* Logo */}
           <Link to="/dashboard" className="flex items-center gap-3" aria-label="Go to dashboard">
-            <img src="/logo.png" alt="TUYUL Trading Bot Logo" className="w-12 h-12 rounded-full" />
+            <div className="relative">
+              <div className="absolute inset-0 bg-gradient-to-r from-amber-400/50 via-yellow-500/50 to-amber-400/50 rounded-lg blur-xl animate-pulse"></div>
+              <img 
+                src="/logo.png" 
+                alt="TUYUL Trading Bot Logo" 
+                className="relative h-16 w-auto rounded-lg object-contain drop-shadow-[0_0_15px_rgba(251,191,36,0.6)]" 
+              />
+            </div>
           </Link>
 
           {/* Desktop Navigation */}
